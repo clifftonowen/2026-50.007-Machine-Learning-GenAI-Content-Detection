@@ -1,0 +1,34 @@
+# Data and outputs
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+models/*
+!models/.gitkeep
+
+submissions/*
+!submissions/.gitkeep
+
+reports/figures/*
+!reports/figures/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Environment / OS
+.env
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+CLAUDE.md
+.claude
