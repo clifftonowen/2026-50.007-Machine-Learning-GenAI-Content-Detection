@@ -4,6 +4,12 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
+# Tuning trial results tracked - small, human-readable JSON, meant to be merged
+# across teammates via git (see src/tuning.py). Everything else under data/processed/
+# (raw split indices, dense feature caches, etc.) stays ignored above.
+!data/processed/tuning_trials/
+!data/processed/tuning_trials/*.json
+
 models/*
 !models/.gitkeep
 

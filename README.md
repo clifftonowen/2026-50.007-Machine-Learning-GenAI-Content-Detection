@@ -107,14 +107,56 @@ Task 4 PDF report in `reports/`.
 
 ---
 
+## Team hyperparameter search (`05_tuning.ipynb`)
+
+Task 3's tuning notebook is built so multiple teammates can search different parts of the
+same model's hyperparameter space in parallel, without stepping on each other or losing
+work if a run gets interrupted partway through.
+
+**How it works:** every trial (one hyperparameter combination, scored under the locked
+5-fold CV) is written to its own small JSON file the moment it finishes, under
+`data/processed/tuning_trials/`. Unlike the rest of `data/`, these files **are tracked in
+git** - small and human-readable, and safe to merge since each teammate's files have
+distinct names. Rerunning the search skips any trial whose file already exists, so an
+interrupted run just picks up where it left off instead of starting over, and merging
+teammates' results is just "have their files present locally" - no manual concatenation.
+
+**Before running your share of the search:**
+
+1. `git pull` so you have everyone's latest trial files.
+2. In `05_tuning.ipynb`'s setup section, set `OWNER` to something that identifies you and
+   your slice of the search space, e.g. `"alice_lr_lo"` for Alice covering the low
+   `learning_rate` band (see the notebook's section 2 for how ranges are typically split).
+   This tags every file you produce so it never collides with a teammate's.
+3. Run stage 1 (the coarse search) for your assigned range.
+4. Commit and push your new trial files:
+   ```bash
+   git add data/processed/tuning_trials/
+   git commit -m "feat: lightgbm stage-1 trials, learning_rate 0.01-0.05"
+   git push
+   ```
+
+**Before running stage 2 (the refined search):** `git pull` first. Stage 2 centers its
+search on the *merged* best trial across everyone's stage-1 results, not just your own, so
+it needs everyone's files present to pick the right center.
+
+**Only one final model gets pickled.** The notebook's last section refits and saves a
+single `.pkl` for the overall winning configuration - this isn't something every teammate
+should do individually. Pickled sklearn/LightGBM/XGBoost objects don't reliably survive
+being unpickled on a different machine's package versions, so only the winner (chosen
+after everyone's results are merged) gets persisted that way.
+
+---
+
 ## Layout
 
 ```
 data/
-  raw/         course data — immutable, gitignored (you add this)
-  processed/   cached splits, result tables, OOF preds — gitignored
+  raw/               course data — immutable, gitignored (you add this)
+  processed/         cached splits, result tables, OOF preds — gitignored
+    tuning_trials/   hyperparameter search results - tracked in git (see below)
 notebooks/     the experiment pipeline (run in order) + final SUBMISSION.ipynb
-src/           reusable, importable helpers (paths, data loading, evaluation, plotting)
+src/           reusable, importable helpers (paths, data loading, evaluation, plotting, tuning)
 reports/
   figures/     saved plots — gitignored
 models/        pickled trained models — gitignored
@@ -122,7 +164,10 @@ submissions/   prediction CSVs incl. LogReg_Prediction.csv — gitignored
 ```
 
 `data/`, `models/`, `submissions/`, and `reports/figures/` are gitignored and kept in git via
-`.gitkeep` sentinels, so only code and small text artifacts are version-controlled.
+`.gitkeep` sentinels, so only code and small text artifacts are version-controlled. The one
+exception is `data/processed/tuning_trials/*.json`, which is deliberately tracked so
+teammates can merge hyperparameter search results via git - see "Team hyperparameter search"
+above.
 
 ---
 
