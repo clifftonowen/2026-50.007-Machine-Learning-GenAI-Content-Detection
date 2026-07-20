@@ -40,7 +40,9 @@ def load_train_features():
         Labels: 1 = machine-generated, 0 = human-authored.
     ids : ndarray, shape (n_train,)
     """
-    df = pd.read_csv(paths.TRAIN_FEATURES_CSV)
+    # id is not numeric (mix of UUID and digit-only strings); force str so pandas
+    # never coerces it and silently misaligns downstream submissions
+    df = pd.read_csv(paths.TRAIN_FEATURES_CSV, dtype={"id": str})
     cols = _feature_columns(df)
     X = df[cols].to_numpy(dtype=np.float64)
     y = df["label"].to_numpy(dtype=np.int64)
@@ -56,7 +58,7 @@ def load_test_features():
     X : ndarray, shape (n_test, 5000)
     ids : ndarray, shape (n_test,)
     """
-    df = pd.read_csv(paths.TEST_FEATURES_CSV)
+    df = pd.read_csv(paths.TEST_FEATURES_CSV, dtype={"id": str})
     cols = _feature_columns(df)
     X = df[cols].to_numpy(dtype=np.float64)
     ids = df["id"].to_numpy()
