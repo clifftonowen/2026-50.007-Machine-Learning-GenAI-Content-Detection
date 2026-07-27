@@ -10,8 +10,10 @@ since both search stages need it.
 
 import hashlib
 import json
+import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from . import evaluation, paths
@@ -128,3 +130,177 @@ def load_trials(model: str) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(records)[cols]
     return df.sort_values("mean", ascending=False).reset_index(drop=True)
+
+
+def run_search(model, owner, build_estimator, sampler, X, y, cv, budget_seconds):
+    """Run trials from `sampler` until a wall-clock budget is spent, then stop.
+
+    Round 4 gives each teammate a fixed compute budget rather than a fixed trial
+    count, because trial cost varies several-fold across machines and model
+    configs - a count that fits one laptop overruns another. Since `run_trial`
+    writes each result the moment it finishes, stopping partway through loses
+    nothing and the team merge is unaffected: a short run simply contributes
+    fewer trials.
+
+    Before starting each trial the projected finish time is checked against the
+    budget using the mean duration of the trials run so far, so the budget is a
+    real cap rather than one that a single slow trial can blow past.
+
+    Cached trials (already on disk, e.g. after a `git pull`) return instantly and
+    are not counted when estimating trial duration.
+
+    Parameters
+    ----------
+    model : str
+        Short model name used in the trial filenames, e.g. "lightgbm_v2_stage1".
+        Use a name no existing search already uses - `load_trials` globs on it,
+        so reusing a key silently merges two different search spaces.
+    owner : str
+        Teammate identifier, e.g. "jovyan_lr_lo".
+    build_estimator : callable
+        `params -> estimator`. Called fresh per trial; `run_trial` does not call
+        `set_params` itself.
+    sampler : iterable of dict
+        Parameter combinations, e.g. a `ParameterSampler` or `ParameterGrid`.
+    X, y : array-like
+        Training data, already restricted to the dev split by the caller.
+    cv : cross-validation splitter
+    budget_seconds : float
+        Wall-clock cap for the whole loop.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per trial run in THIS call (not the merged history - use
+        `load_trials` for that), sorted by mean descending.
+    """
+    start = time.monotonic()
+    records, durations = [], []
+
+    for i, params in enumerate(sampler, start=1):
+        elapsed = time.monotonic() - start
+        projected = np.mean(durations) if durations else 0.0
+        if elapsed + projected > budget_seconds:
+            print(f"\nBudget reached after {elapsed / 60:.1f} min "
+                  f"({len(records)} trials this run) - stopping before trial {i}.")
+            break
+
+        t0 = time.monotonic()
+        record = run_trial(model, owner, build_estimator(params), params, X, y, cv)
+        took = time.monotonic() - t0
+        records.append(record)
+        # A cached hit returns in milliseconds and would drag the estimate down.
+        if took > 1.0:
+            durations.append(took)
+
+        elapsed = time.monotonic() - start
+        rate = len(records) / (elapsed / 3600) if elapsed > 0 else 0.0
+        print(f"[{i}] mean={record['mean']:.4f} std={record['std']:.4f}  "
+              f"({took:.0f}s, {elapsed / 60:.1f}/{budget_seconds / 60:.0f} min, "
+              f"{rate:.0f} trials/hr)")
+    else:
+        print(f"\nSampler exhausted after {(time.monotonic() - start) / 60:.1f} min "
+              f"({len(records)} trials) - budget was not the limit.")
+
+    cols = ["owner", "params", "mean", "std", "scores"]
+    if not records:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(records)[cols]
+    return df.sort_values("mean", ascending=False).reset_index(drop=True)
+
+
+def oof_path(name: str, owner: str) -> Path:
+    """Path for one ensemble member's out-of-fold scores.
+
+    Parameters
+    ----------
+    name : str
+        Member name, e.g. "lightgbm_v2". Must not contain "__".
+    owner : str
+        Teammate identifier, kept in the filename so provenance survives.
+
+    Returns
+    -------
+    Path
+    """
+    assert "__" not in name, f"'__' is the name/owner separator: {name}"
+    paths.OOF.mkdir(parents=True, exist_ok=True)
+    return paths.OOF / f"{name}__{owner}.npy"
+
+
+def save_oof(name: str, owner: str, scores) -> Path:
+    """Persist one member's out-of-fold scores for the team to merge via git.
+
+    Stored as float32: 16,000 values is 64 KB, small enough to track in git and
+    merge exactly like the trial JSONs. That is what lets three people generate
+    different ensemble members in parallel and have notebook 10 pick them all up
+    after a `git pull`, with nobody re-running anyone else's fits.
+
+    Scores may be probabilities OR raw decision-function margins - the ensemble
+    combines members on ranks, so only the ordering matters.
+
+    Parameters
+    ----------
+    name : str
+        Member name, e.g. "logreg_elasticnet".
+    owner : str
+    scores : array-like, shape (n_dev,)
+
+    Returns
+    -------
+    Path
+        Where it was written.
+    """
+    scores = np.asarray(scores, dtype=np.float32)
+    assert scores.ndim == 1, scores.shape
+    assert np.isfinite(scores).all(), "non-finite OOF scores"
+    path = oof_path(name, owner)
+    np.save(path, scores)
+    return path
+
+
+def load_oof(name: str):
+    """Load one member's out-of-fold scores, whoever produced them.
+
+    Parameters
+    ----------
+    name : str
+        Member name, e.g. "xgboost".
+
+    Returns
+    -------
+    ndarray, shape (n_dev,)
+
+    Raises
+    ------
+    FileNotFoundError
+        If no teammate has produced this member yet.
+    ValueError
+        If two teammates both produced it - that is duplicated compute and an
+        ambiguous choice, so it should be resolved by deleting one rather than
+        silently picking.
+    """
+    matches = sorted(paths.OOF.glob(f"{name}__*.npy"))
+    if not matches:
+        raise FileNotFoundError(
+            f"no OOF file for '{name}' - has its owner run their section and pushed?")
+    if len(matches) > 1:
+        raise ValueError(
+            f"'{name}' produced by multiple owners: {[m.name for m in matches]}. "
+            "Delete all but one.")
+    return np.load(matches[0])
+
+
+def available_oof() -> pd.DataFrame:
+    """List every merged OOF member currently on disk.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: member, owner, n. Empty (with those columns) if none exist yet.
+    """
+    rows = []
+    for f in sorted(paths.OOF.glob("*__*.npy")):
+        member, owner = f.stem.split("__", 1)
+        rows.append({"member": member, "owner": owner, "n": len(np.load(f))})
+    return pd.DataFrame(rows, columns=["member", "owner", "n"])
