@@ -105,7 +105,7 @@ def _load_csr_cached(csv_path, stem, meta_cols):
         and matrix_path.stat().st_mtime >= csv_path.stat().st_mtime
     )
     if fresh:
-        cached = np.load(meta_path, allow_pickle=False)
+        cached = np.load(meta_path, allow_pickle=True)
         meta = pd.DataFrame({c: cached[c] for c in meta_cols})
         return sp.load_npz(matrix_path), meta
 
