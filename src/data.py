@@ -76,6 +76,26 @@ def _build_csr(csv_path, meta_cols):
     return sp.vstack(blocks, format="csr"), pd.concat(meta, ignore_index=True)
 
 
+def _packable(a):
+    """Coerce an array into a dtype `np.savez` can store without pickling.
+
+    `id` is a string column, so `.to_numpy()` hands back dtype=object, and numpy
+    serializes object arrays by pickling them - which then cannot be read back
+    unless the reader opts into `allow_pickle=True`. Converting to fixed-width
+    unicode keeps the cache a plain data file.
+
+    Parameters
+    ----------
+    a : ndarray
+
+    Returns
+    -------
+    ndarray
+        Unchanged unless dtype was object, in which case fixed-width unicode.
+    """
+    return a.astype("U") if a.dtype == object else a
+
+
 def _load_csr_cached(csv_path, stem, meta_cols):
     """Load a feature CSV as CSR, caching the result under data/processed/.
 
@@ -105,13 +125,20 @@ def _load_csr_cached(csv_path, stem, meta_cols):
         and matrix_path.stat().st_mtime >= csv_path.stat().st_mtime
     )
     if fresh:
-        cached = np.load(meta_path, allow_pickle=False)
-        meta = pd.DataFrame({c: cached[c] for c in meta_cols})
-        return sp.load_npz(matrix_path), meta
+        try:
+            cached = np.load(meta_path, allow_pickle=False)
+            meta = pd.DataFrame({c: cached[c] for c in meta_cols})
+            return sp.load_npz(matrix_path), meta
+        except ValueError:
+            # An older cache stored `id` as an object array, which npz can only
+            # round-trip through pickle. Rebuild rather than enabling
+            # allow_pickle - unpickling a data cache is a strictly worse trade
+            # than re-parsing a CSV we can regenerate.
+            pass
 
     X, meta = _build_csr(csv_path, meta_cols)
     sp.save_npz(matrix_path, X)
-    np.savez(meta_path, **{c: meta[c].to_numpy() for c in meta_cols})
+    np.savez(meta_path, **{c: _packable(meta[c].to_numpy()) for c in meta_cols})
     return X, meta
 
 

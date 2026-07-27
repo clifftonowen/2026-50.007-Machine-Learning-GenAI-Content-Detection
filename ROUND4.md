@@ -67,7 +67,23 @@ pip install -r requirements.txt     # scipy is now an explicit dependency
 ```
 
 You need `data/raw/` populated from Kaggle and `01_eda.ipynb` already run, so that
-`data/processed/dev_idx.npy` and `holdout_idx.npy` exist. Nothing below re-splits.
+`data/processed/dev_idx.npy` and `holdout_idx.npy` exist. Nothing below re-splits — and on
+a machine where 01 has never run, `05f` section 1 fails on the *second* line with
+`FileNotFoundError: dev_idx.npy`, not on the sparse load.
+
+Those two `.npy` files are gitignored, so **every machine has to run `01_eda.ipynb` once**,
+even one that has pulled everything. Same for the tuned-parameter JSONs notebook 10 reads
+(`best_xgboost_params.json` and friends) — but those are cheap to regenerate, because the
+`tuning_trials/*.json` they are derived from *are* tracked: re-run only the final cell of
+`05c`/`05d`/`05e` and each one rewrites its params file from the merged trials without
+re-searching anything.
+
+> **If a `src/` fix does not seem to take effect, restart the kernel.** Python caches
+> imported modules, so editing `src/data.py` does nothing to a kernel that already imported
+> it — and Jupyter renders the traceback from the *current* file while running the *old*
+> bytecode, which makes the error look like it is pointing at a line that clearly cannot
+> raise it. Both new notebooks now enable `%autoreload 2` in their setup cell, so this only
+> bites on the very first run after a pull.
 
 The first sparse load builds a cache and asserts it matches the dense path — it takes a
 couple of minutes and then never runs again:
