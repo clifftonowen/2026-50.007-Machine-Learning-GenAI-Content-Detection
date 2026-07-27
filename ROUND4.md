@@ -1,6 +1,19 @@
 # Round 4 — work division
 
-**Members:** Jovyan, Cliffton, Brian Wong · **Budget:** 3h00 compute each · **Deadline:** 10 Aug 2026
+**Members:** Jovyan, Cliffton, Brian Wong, Koko · **Budget:** 3h00 compute each · **Deadline:** 10 Aug 2026
+
+> **Sessions 1–2 (the LightGBM retune) are STOPPED. Sessions 3–4 are superseded by
+> [`ENSEMBLE_PLAN.md`](ENSEMBLE_PLAN.md).** Job 1 got partway - 126 stage-1 trials from
+> Cliffton's `learning_rate` band, zero from the other two, zero at stage 2, and finishing
+> it would cost three people another 2h30 each for an expected gain of about +0.005, inside
+> the 0.0084 noise floor. Job 2 was never started and is worth more. The four-way ensembling
+> lab in `ENSEMBLE_PLAN.md` replaces it.
+>
+> The rest of this file is still current and still required reading: the leaderboard facts,
+> the sparse-load setup below, and the open private-LB pick question at the bottom. Cliffton's
+> 126 trials are worth keeping (`05f` section 4's knob-influence analysis still runs on them)
+> but are **still untracked in git** - commit `data/processed/tuning_trials/` before anything
+> else.
 
 Task 3 currently sits at **0.73583** public Macro F1 (`lightgbm_share50.csv`, share 0.4996).
 This round attacks the two things notebook 09 left open. Read `notebooks/09_share_matched_comparison.ipynb`
@@ -101,7 +114,9 @@ new notebooks pass `sparse=True`.
 
 ---
 
-## Session 1 — LightGBM stage-1 search · 2h00 · everyone in parallel
+## Session 1 — LightGBM stage-1 search · 2h00 · everyone in parallel · **STOPPED**
+
+> Kept as the record of what was planned and how far it got. See the banner at the top.
 
 Notebook: **`05f_lightgbm_retune.ipynb`**, sections 0–3.
 
@@ -141,7 +156,7 @@ running it early would centre it on your own band's local best.
 
 ---
 
-## Session 2 — stage-2 refinement · 0h30 · after everyone has pushed
+## Session 2 — stage-2 refinement · 0h30 · after everyone has pushed · **STOPPED**
 
 `git pull`, then run `05f` sections 4–6.
 
@@ -166,7 +181,11 @@ git push
 
 ---
 
-## Session 3 — ensemble OOF generation · ~0h30 · after the stage-2 merge
+## Session 3 — ensemble OOF generation · ~0h30 · **superseded by `ENSEMBLE_PLAN.md`**
+
+> Still the right idea, but the member split changed (Koko joined, and the LightGBM member
+> is `lightgbm` rather than `lightgbm_v2` now that the retune is stopped). Follow
+> [`ENSEMBLE_PLAN.md`](ENSEMBLE_PLAN.md) phase A, not the table below.
 
 Notebook: **`10_stacked_ensemble.ipynb`**, sections 0–3. Change `ME` and nothing else.
 
@@ -202,7 +221,12 @@ git push
 
 ---
 
-## Session 4 — ensemble and submissions · Cliffton · minutes, not hours
+## Session 4 — ensemble and submissions · Cliffton · **superseded by `ENSEMBLE_PLAN.md`**
+
+> The guard and the "anything inside ±0.0084 is a tie" discipline carry over unchanged. What
+> changed: combiners are now scored **out of fold** rather than in-sample, four families are
+> explored instead of one, and the batch drops to two files because `lightgbm_share50.csv` is
+> already the matched-share control.
 
 `git pull`, then run `10_stacked_ensemble.ipynb` sections 4–8. The weight search runs on
 cached OOF arrays, so it is CPU-seconds; the full refits on all 20,000 rows are the only
@@ -265,8 +289,9 @@ before any round 5.
 |---|---|
 | `src/data.py` | `sparse=True` on both loaders → cached float32 CSR; `check_sparse_path()` guard. Dense stays the default. |
 | `src/tuning.py` | `run_search()` (time-boxed driver), `save_oof()` / `load_oof()` / `available_oof()`. `run_trial` and `load_trials` untouched. |
-| `src/ensemble.py` | **new** — rank conversion, weighted blending, simplex weight sweep, NNLS stacker, diversity table, seed averaging. |
-| `.gitignore` | tracks `data/processed/oof/*.npy`, same pattern as `tuning_trials/`. |
+| `src/ensemble.py` | **new** — rank conversion, weighted blending, simplex weight sweep, NNLS stacker, diversity table, seed averaging. Later gained `threshold_at_share`; see `ENSEMBLE_PLAN.md`. |
+| `src/combiners.py` | **new**, added with `ENSEMBLE_PLAN.md` - the four combiner families and the out-of-fold evaluation harness. |
+| `.gitignore` | tracks `data/processed/oof/*.npy` and `data/processed/ensemble_trials/*.json`, same pattern as `tuning_trials/`. |
 | `requirements.txt` | `scipy` pinned explicitly (it was already a sklearn dependency). |
 
 `05_tuning.ipynb` and notebooks 01–09 are **untouched** — they are the record of the journey

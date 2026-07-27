@@ -114,6 +114,46 @@ def blend(R, weights):
     return R @ np.asarray(weights, dtype=np.float64)
 
 
+def threshold_at_share(scores, share):
+    """Label the top `share` of rows by score as class 1, the rest as class 0.
+
+    The one place the share-quantile cut is defined. Notebooks 08, 09 and 10 each
+    had their own copy inside `write_at_share`; they now call this so the local
+    metric and the submission writer cannot drift apart.
+
+    Selects the top `round(share * n)` rows exactly, rather than taking a quantile
+    and keeping everything at or above it. The two agree whenever scores are
+    distinct, but the quantile form silently overshoots when they are not: on 6,999
+    rows with heavily tied scores it missed the requested share by 19 rows, which
+    would trip the submission guards and, worse, move the predicted class balance -
+    the single largest driver of leaderboard score on this task.
+
+    Ties at the cut are broken by row order, which is arbitrary but deterministic.
+    That is a real limitation and not a fixed one: a combiner whose scores take few
+    distinct values (a raw majority vote over k members takes k+1) will have the cut
+    land *inside* a tied block, and every row in that block is then decided by its
+    position in the file rather than by any model. `combiners._break_ties` exists to
+    stop that happening, and `combiners.tied_fraction_at_share` measures it.
+
+    Parameters
+    ----------
+    scores : array-like, shape (n_samples,)
+    share : float
+        Fraction of rows to predict as class 1.
+
+    Returns
+    -------
+    ndarray, shape (n_samples,)
+        Integer 0/1 labels, with exactly `round(share * n)` ones.
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    n = len(scores)
+    k = int(np.clip(round(share * n), 0, n))
+    preds = np.zeros(n, dtype=int)
+    preds[np.argsort(-scores, kind="stable")[:k]] = 1
+    return preds
+
+
 def macro_f1_at_share(scores, y_true, share):
     """Macro F1 when the top `share` of rows by score are labelled machine.
 
@@ -134,9 +174,7 @@ def macro_f1_at_share(scores, y_true, share):
     -------
     float
     """
-    scores = np.asarray(scores, dtype=np.float64)
-    thr = np.quantile(scores, 1 - share)
-    return f1_score(y_true, (scores >= thr).astype(int), average="macro")
+    return f1_score(y_true, threshold_at_share(scores, share), average="macro")
 
 
 def _compositions(total, parts):
