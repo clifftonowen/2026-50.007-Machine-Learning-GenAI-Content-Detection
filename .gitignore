@@ -11,10 +11,17 @@ data/processed/*
 !data/processed/tuning_trials/*.json
 
 # Out-of-fold ensemble member scores, tracked for the same reason: 16000 float32
-# values is 64 KB per member, so three teammates can each generate different
-# members in parallel and 10_stacked_ensemble picks them all up after a git pull.
+# values is 64 KB per member, so teammates can each generate different members in
+# parallel and 10_stacked_ensemble picks them all up after a git pull.
 !data/processed/oof/
 !data/processed/oof/*.npy
+
+# Combiner results from the four ensembling lanes, same merge-by-git protocol as
+# the tuning trials above (see src/combiners.py). One small JSON per combiner
+# config, so four people sweep different lanes in parallel without ever editing
+# the same file.
+!data/processed/ensemble_trials/
+!data/processed/ensemble_trials/*.json
 
 models/*
 !models/.gitkeep

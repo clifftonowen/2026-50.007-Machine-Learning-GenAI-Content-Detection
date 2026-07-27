@@ -1,0 +1,25 @@
+{
+  "model": "lightgbm_v2_stage1",
+  "owner": "cliffton_lr_mid",
+  "params": {
+    "colsample_bytree": 0.2015913907274568,
+    "learning_rate": 0.07215248316171574,
+    "max_bin": 127,
+    "min_child_samples": 57,
+    "min_child_weight": 0.8235575872113335,
+    "n_estimators": 229,
+    "num_leaves": 359,
+    "reg_alpha": 1.7261078825945462,
+    "reg_lambda": 1.3628790608458017,
+    "subsample": 0.9526392726847217
+  },
+  "mean": 0.7381314878882606,
+  "std": 0.0060884007935061496,
+  "scores": [
+    0.7287683938925743,
+    0.7414299319526482,
+    0.7439570457305178,
+    0.7433905938364537,
+    0.7331114740291087
+  ]
+}

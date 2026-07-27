@@ -12,6 +12,7 @@ DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
 TUNING_TRIALS = DATA_PROCESSED / "tuning_trials"
 OOF = DATA_PROCESSED / "oof"  # per-member out-of-fold scores, tracked in git
+ENSEMBLE_TRIALS = DATA_PROCESSED / "ensemble_trials"  # combiner results, tracked in git
 NOTEBOOKS = PROJECT_ROOT / "notebooks"
 REPORTS = PROJECT_ROOT / "reports"
 FIGURES = REPORTS / "figures"

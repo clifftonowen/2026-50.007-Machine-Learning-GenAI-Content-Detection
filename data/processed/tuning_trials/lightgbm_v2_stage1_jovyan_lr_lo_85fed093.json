@@ -1,0 +1,25 @@
+{
+  "model": "lightgbm_v2_stage1",
+  "owner": "jovyan_lr_lo",
+  "params": {
+    "colsample_bytree": 0.6019711854485497,
+    "learning_rate": 0.014829840095610579,
+    "max_bin": 63,
+    "min_child_samples": 10,
+    "min_child_weight": 8.562225776747434,
+    "n_estimators": 151,
+    "num_leaves": 259,
+    "reg_alpha": 1.0095863684167743,
+    "reg_lambda": 0.43130478384851,
+    "subsample": 0.7174410703790222
+  },
+  "mean": 0.7137164827196265,
+  "std": 0.01112271025812884,
+  "scores": [
+    0.6952596542180761,
+    0.7201211111542143,
+    0.719658689355362,
+    0.7263350510521638,
+    0.7072079078183169
+  ]
+}
