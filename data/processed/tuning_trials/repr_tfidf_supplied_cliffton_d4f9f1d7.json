@@ -1,0 +1,17 @@
+{
+  "model": "repr_tfidf_supplied",
+  "owner": "cliffton",
+  "params": {
+    "clf": "complementnb",
+    "representation": "tfidf_supplied"
+  },
+  "mean": 0.6579810092058624,
+  "std": 0.006654348905060069,
+  "scores": [
+    0.647411082316306,
+    0.6612222922428472,
+    0.6561480298504521,
+    0.6573731290983008,
+    0.6677505125214065
+  ]
+}
