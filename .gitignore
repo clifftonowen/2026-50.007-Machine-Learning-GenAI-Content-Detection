@@ -26,7 +26,6 @@ data/processed/*
 models/*
 !models/.gitkeep
 
-submissions/*
 !submissions/.gitkeep
 
 reports/figures/*
