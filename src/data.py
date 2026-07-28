@@ -1,9 +1,17 @@
 """Feature-matrix loading for Tasks 1-3.
 
-Loads the course-supplied pre-computed TF-IDF matrices directly. Do NOT
-re-tokenize / re-fit a vectorizer on raw text for Tasks 1-3 — the features are
-the model input. Skeleton: confirm the exact column names on first load and
-fill in the schema-dependent bits.
+Loads the course-supplied pre-computed TF-IDF matrices directly. These remain the
+model input for Tasks 1 and 2, and the baseline representation for Task 3.
+
+> **Amended in round 5.** This docstring used to say "Do NOT re-tokenize / re-fit a
+> vectorizer on raw text". That was the right default while the question was which
+> *model* to fit, and it is now superseded for Task 3 only. The brief permits extra
+> feature engineering when it is described in the report, and the COLING paper shows
+> the test set comes from different source corpora than train, which makes the
+> supplied features (lemmatized, stop words removed, so content words only) the part
+> of the signal least likely to transfer. `src/text.py` loads the raw text and
+> `src/text_features.py` builds the style-based alternatives. Tasks 1 and 2 still use
+> this module and nothing else.
 
 Two loading paths share one column ordering:
 
