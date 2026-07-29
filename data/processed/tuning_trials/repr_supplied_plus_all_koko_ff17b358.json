@@ -1,0 +1,17 @@
+{
+  "model": "repr_supplied_plus_all",
+  "owner": "koko",
+  "params": {
+    "clf": "linearsvc",
+    "representation": "supplied_plus_all"
+  },
+  "mean": 0.5332060883999119,
+  "std": 0.14077896496322284,
+  "scores": [
+    0.41564051383976974,
+    0.6573798507991957,
+    0.3153102083802251,
+    0.6337051153734736,
+    0.6439947536068953
+  ]
+}
