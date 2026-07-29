@@ -1,0 +1,17 @@
+{
+  "model": "repr_supplied_plus_style",
+  "owner": "koko",
+  "params": {
+    "clf": "logreg",
+    "representation": "supplied_plus_style"
+  },
+  "mean": 0.6944082646699117,
+  "std": 0.003806473621940247,
+  "scores": [
+    0.6919865901379925,
+    0.6935710375939483,
+    0.6915974627879252,
+    0.7018905591075697,
+    0.6929956737221227
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "model": "repr_supplied_plus_all",
+  "owner": "koko",
+  "params": {
+    "clf": "lightgbm",
+    "representation": "supplied_plus_all"
+  },
+  "mean": 0.8794773094055941,
+  "std": 0.005340193472314661,
+  "scores": [
+    0.8745204938592115,
+    0.8726787126890513,
+    0.8793734919083189,
+    0.8862630640547633,
+    0.8845507845166252
+  ]
+}
