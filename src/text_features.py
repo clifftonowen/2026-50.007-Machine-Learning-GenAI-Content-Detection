@@ -38,6 +38,7 @@ import re
 
 import numpy as np
 import pandas as pd
+from collections import Counter
 from scipy import sparse
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
@@ -47,7 +48,15 @@ from . import paths
 RANDOM_STATE = 42
 
 DENSE_BLOCKS = ("B_punctuation", "C_casing", "D_structure", "E_length",
-                "F_diversity", "G_readability")
+                "F_diversity", "G_readability",
+                # Added in round 6. Notebook 14's ablation found F_diversity the single
+                # most valuable family for held-out-domain transfer (dropping it cost
+                # 0.0510 grouped Macro F1, 1.7x what 20,000 char n-grams cost) off five
+                # columns, and E_burstiness / E_sent_len_std ranked second and third on
+                # permutation importance. J and K build out those two ideas rather than
+                # editing F and E, so every number in ablation_results.csv stays valid
+                # and the new measures can be ablated as their own families.
+                "J_diversity_ext", "K_variability")
 FITTED_BLOCKS = ("H_char_ngrams", "I_word_ngrams")
 ALL_BLOCKS = ("A_function_words",) + DENSE_BLOCKS + FITTED_BLOCKS
 
@@ -137,6 +146,134 @@ def _yules_k(tokens):
     spectrum = pd.Series(freqs).value_counts()  # how many types occur i times
     total = float(sum((i ** 2) * v for i, v in spectrum.items()))
     return 1e4 * (total - n) / (n ** 2)
+
+
+def _mtld_one_direction(tokens, threshold=0.72):
+    """MTLD factor count in one direction. Helper for `_mtld`."""
+    factors, types, n = 0.0, set(), 0
+    for tok in tokens:
+        types.add(tok)
+        n += 1
+        ttr = len(types) / n
+        if ttr <= threshold:
+            factors += 1.0
+            types, n = set(), 0
+    if n > 0:
+        ttr = len(types) / n
+        # Partial trailing factor, scaled by how far it got toward the threshold.
+        denom = 1.0 - threshold
+        factors += (1.0 - ttr) / denom if denom > 0 else 0.0
+    return factors
+
+
+def _mtld(tokens, threshold=0.72):
+    """Measure of Textual Lexical Diversity, forward and backward averaged.
+
+    The standard length-robust diversity measure. Where TTR falls with length and MATTR
+    fixes a window, MTLD measures how many tokens it takes for diversity to decay to a
+    threshold, which is a property of the writing rather than of the sample size. Added
+    in round 6 because block F's five columns were the strongest transfer family in
+    notebooks 14's ablation and MTLD is the obvious missing member.
+
+    Parameters
+    ----------
+    tokens : list of str
+    threshold : float, default 0.72
+        The conventional value from McCarthy and Jarvis.
+
+    Returns
+    -------
+    float
+        0.0 for an empty document. Never inf: a document that never crosses the
+        threshold yields one partial factor, so the divisor is bounded below.
+    """
+    n = len(tokens)
+    if n == 0:
+        return 0.0
+    fwd = _mtld_one_direction(tokens, threshold)
+    bwd = _mtld_one_direction(tokens[::-1], threshold)
+    scores = [n / f for f in (fwd, bwd) if f > 0]
+    return float(np.mean(scores)) if scores else float(n)
+
+
+def _entropy(values):
+    """Shannon entropy in nats of the empirical distribution of `values`.
+
+    Used for the length distributions in block K: two documents can share a mean and a
+    standard deviation while one alternates between two lengths and the other spreads
+    smoothly, and entropy separates them.
+    """
+    if len(values) == 0:
+        return 0.0
+    counts = np.asarray(list(Counter(values).values()), dtype=np.float64)
+    p = counts / counts.sum()
+    return float(-(p * np.log(p)).sum())
+
+
+def _ngram_stats(tokens, n):
+    """(distinct rate, max repeat rate) over `n`-grams of `tokens`.
+
+    Distinct-n is a direct measure of local repetition and one of the better-known
+    decoded-text markers: sampling with a low temperature reuses phrasing, which shows
+    up here long before it shows up in a unigram statistic.
+
+    Returns (0.0, 0.0) when the document is shorter than one n-gram.
+    """
+    total = len(tokens) - n + 1
+    if total <= 0:
+        return 0.0, 0.0
+    grams = Counter(tuple(tokens[i:i + n]) for i in range(total))
+    return len(grams) / total, max(grams.values()) / total
+
+
+def _moments(x):
+    """(skew, excess kurtosis) computed directly, returning 0.0 on a constant array.
+
+    scipy.stats would warn and return nan when the standard deviation is 0, which
+    happens for any single-sentence document.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if len(x) < 2:
+        return 0.0, 0.0
+    sd = x.std()
+    if sd <= 1e-12:
+        return 0.0, 0.0
+    z = (x - x.mean()) / sd
+    return float((z ** 3).mean()), float((z ** 4).mean() - 3.0)
+
+
+def _acf1(x):
+    """Lag-1 autocorrelation, 0.0 when undefined.
+
+    Asks whether a long sentence tends to follow a long sentence. Burstiness measures
+    how *much* sentence length varies; this measures whether the variation is
+    structured or independent, which is a different question and not implied by it.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if len(x) < 3:
+        return 0.0
+    x = x - x.mean()
+    denom = float((x ** 2).sum())
+    if denom <= 1e-12:
+        return 0.0
+    return float((x[:-1] * x[1:]).sum() / denom)
+
+
+def _longest_similar_run(x, tol=0.25):
+    """Longest run of consecutive values within `tol` relative distance of each other.
+
+    A long run of similarly-sized sentences is the concrete shape of the steady rhythm
+    that burstiness only summarises.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if len(x) < 2:
+        return float(len(x))
+    best = run = 1
+    for a, b in zip(x[:-1], x[1:]):
+        ref = max(abs(a), 1e-9)
+        run = run + 1 if abs(b - a) / ref <= tol else 1
+        best = max(best, run)
+    return float(best)
 
 
 def _document_features(text):
@@ -230,6 +367,70 @@ def _document_features(text):
     f["G_words_per_sentence"] = wps
     f["G_polysyllable_frac"] = _safe_div(
         sum(1 for w in words if _count_syllables(w) >= 3), n_word)
+
+    # --- J: extended lexical diversity ---------------------------------------------
+    # Block F returned the largest transfer value of any family in notebook 14 off five
+    # columns. These are the length-robust measures F was missing, plus the local
+    # repetition rates that no unigram statistic can see.
+    f["J_mattr_25"] = _mattr(lower_words, window=25)
+    f["J_mattr_50"] = _mattr(lower_words, window=50)
+    f["J_mattr_200"] = _mattr(lower_words, window=200)
+    f["J_mtld"] = _mtld(lower_words)
+    log_n = float(np.log(n_word)) if n_word > 1 else 0.0
+    log_v = float(np.log(n_type)) if n_type > 1 else 0.0
+    f["J_herdan_c"] = _safe_div(log_v, log_n)
+    f["J_maas"] = _safe_div(log_n - log_v, log_n ** 2)
+    # Simpson's D: probability that two tokens drawn without replacement match.
+    f["J_simpson_d"] = _safe_div(
+        float((counts * (counts - 1)).sum()) if len(counts) else 0.0,
+        n_word * (n_word - 1))
+    n_hapax = int((counts == 1).sum()) if len(counts) else 0
+    # Honore's R blows up as the hapax fraction approaches 1, which is every very short
+    # document, so the denominator is floored rather than left to produce inf.
+    f["J_honore_r"] = _safe_div(100.0 * log_n,
+                                max(1.0 - _safe_div(n_hapax, n_type), 1e-3))
+    d2, r2 = _ngram_stats(lower_words, 2)
+    d3, r3 = _ngram_stats(lower_words, 3)
+    f["J_distinct_2"] = d2
+    f["J_distinct_3"] = d3
+    f["J_max_trigram_repeat"] = r3
+    content = [w for w in lower_words if w not in ENGLISH_STOP_WORDS]
+    stops = [w for w in lower_words if w in ENGLISH_STOP_WORDS]
+    f["J_content_ttr"] = _safe_div(len(set(content)), len(content))
+    f["J_stopword_ttr"] = _safe_div(len(set(stops)), len(stops))
+    half = n_word // 2
+    if half >= 1:
+        first = _safe_div(len(set(lower_words[:half])), half)
+        second = _safe_div(len(set(lower_words[half:])), n_word - half)
+        f["J_ttr_half_ratio"] = _safe_div(first, second)
+    else:
+        f["J_ttr_half_ratio"] = 0.0
+
+    # --- K: rhythm and variability --------------------------------------------------
+    # E_burstiness is std/mean of sentence length, one summary of a distribution worth
+    # several. E_burstiness and E_sent_len_std were the second and third most important
+    # dense features on a held-out cluster in notebook 14 section 6.
+    sl = sent_words
+    sl_mean, sl_std = float(sl.mean()), float(sl.std())
+    # sent_words is np.zeros(1) when the document has no sentence terminator, so it is
+    # never empty and the percentiles below are always defined.
+    q1 = float(np.percentile(sl, 25))
+    q3 = float(np.percentile(sl, 75))
+    f["K_sent_len_iqr"] = q3 - q1
+    f["K_sent_len_iqr_ratio"] = _safe_div(q3 - q1, float(np.median(sl)))
+    f["K_sent_len_mad"] = float(np.abs(sl - np.median(sl)).mean())
+    f["K_sent_len_entropy"] = _entropy([int(v) for v in sl])
+    f["K_sent_len_acf1"] = _acf1(sl)
+    skew, kurt = _moments(sl)
+    f["K_sent_len_skew"] = skew
+    f["K_sent_len_kurt"] = kurt
+    f["K_frac_within_1sd"] = (
+        float(np.mean(np.abs(sl - sl_mean) <= sl_std)) if sl_std > 0 else 1.0)
+    f["K_longest_run_similar"] = _longest_similar_run(sl)
+    para_lens = np.array([len(p) for p in para], dtype=float) if para else np.zeros(1)
+    f["K_para_len_std"] = float(para_lens.std())
+    f["K_para_len_cv"] = _safe_div(float(para_lens.std()), float(para_lens.mean()))
+    f["K_word_len_entropy"] = _entropy([int(v) for v in word_lens])
 
     return f
 
