@@ -206,6 +206,44 @@ def coverage(train_labels, test_labels):
     return pd.DataFrame(rows).sort_values("ratio", ascending=False).reset_index(drop=True)
 
 
+def length_groups(texts, *, n_groups=3):
+    """Split documents into equal-sized length bands. The round-6 grouping protocol.
+
+    Replaces k-means as the source of grouped-CV folds. Notebook 13's clustering passed
+    its stability gate on one machine (min pairwise ARI 0.9703) and failed on another
+    (0.5991 over the same three seeds, 0.1043 over five), because the style matrix mixes
+    columns whose standard deviations span a factor of ~460,000 and the partition is
+    genuinely multi-modal rather than well separated. A protocol four teammates cannot
+    reproduce is not a protocol.
+
+    Length bands fix that and cost nothing in fidelity. Measured on the round-5 chosen
+    representation, held-out Macro F1 was 0.8089 under length terciles against 0.7894 and
+    0.8051 under k-means at two seeds - a 0.0195 spread - while a deliberately random
+    3-way grouping scored 0.8742 against standard CV's 0.8764. **The random control is
+    the important number:** it shows the transfer gap comes from the structure of the
+    grouping and not from training on fewer rows, which is the assumption the whole
+    protocol rests on. The k-means clusters were dominated by paragraph and line-length
+    columns anyway, so length bands target the same structure explicitly.
+
+    Deterministic, unfitted, identical on every machine, and the bands are balanced by
+    construction, which k-means was not (one dev cluster held 532 rows and had to be
+    skipped, leaving only two usable folds).
+
+    Parameters
+    ----------
+    texts : array-like of str, shape (n_samples,)
+    n_groups : int, default 3
+
+    Returns
+    -------
+    ndarray of int, shape (n_samples,)
+        Group index per row, 0 = shortest.
+    """
+    lengths = np.array([len(t) for t in np.asarray(texts)], dtype=float)
+    qs = np.linspace(0, 1, n_groups + 1)[1:-1]
+    return np.digitize(lengths, np.quantile(lengths, qs)).astype(int)
+
+
 def cluster_cv(labels, y, *, min_per_class=50):
     """Leave-one-cluster-out folds, as a list of (train_idx, test_idx).
 
