@@ -22,3 +22,10 @@ lightgbm>=4.0
 
 # --- notebooks ---
 jupyter>=1.0
+
+# --- reporting (Task 4 deliverables) ---
+# Used only by reports/build_report.py and reports/build_deck.py, which generate the
+# submitted report and slides from the result ledgers in data/processed/. Kept as a
+# separate group because nothing in src/ or notebooks/ imports them.
+python-docx>=1.1
+python-pptx>=0.6
