@@ -1,0 +1,24 @@
+{
+  "model": "lgbm_text_stage1",
+  "owner": "shared",
+  "params": {
+    "colsample_bytree": 0.5198042692950159,
+    "min_child_samples": 7,
+    "n_estimators": 456,
+    "reg_alpha": 0.34104824737458306,
+    "reg_lambda": 0.13010318597055903,
+    "learning_rate": 0.034494,
+    "num_leaves": 149,
+    "max_depth": -1,
+    "subsample": 1.0
+  },
+  "mean": 0.8121287057969141,
+  "std": 0.10246331273225298,
+  "scores": [
+    0.6306787170576584,
+    0.7760721285857672,
+    0.8807299350061881,
+    0.9217733391784024,
+    0.8513894091565539
+  ]
+}
