@@ -1,0 +1,340 @@
+# LiteLightGBM module documentation
+
+## Overview
+
+`src/lite_lightgbm.py` defines a small, auditable, LightGBM-like classifier for this
+project's binary sparse-text problem. It retains the central ideas behind LightGBM:
+
+- second-order gradient boosting for binary log loss;
+- frequency-weighted numeric feature bins;
+- gradient, Hessian, and row-count histograms;
+- leaf-wise, best-first tree growth;
+- L1 and L2 regularized leaf corrections;
+- row and feature subsampling; and
+- dense NumPy and sparse SciPy input.
+
+The module depends only on NumPy, SciPy, and the Python standard library. It does not
+import LightGBM or scikit-learn. Its small parameter and prediction interface is
+duck-typed so external evaluation utilities can clone and score the estimator without
+becoming implementation dependencies.
+
+The detailed algorithm, implementation milestones, validation rules, and acceptance
+gates live in [`lite_lightgbm.md`](lite_lightgbm.md). This file is the API and usage
+reference.
+
+## Current status
+
+The module is currently an implementation scaffold. Its data containers, estimator
+constructor, parameter helpers, and optional metadata hook are usable. Numerical,
+binning, training, and prediction routines deliberately raise `NotImplementedError`
+until their corresponding milestones are implemented and tested.
+
+## Supported scope
+
+- Labels must contain both integer classes `0` and `1`.
+- Features must be finite and numeric.
+- Input may be a two-dimensional NumPy array or SciPy sparse matrix.
+- Sparse input must remain sparse throughout training and prediction.
+- The only objective is binary log loss.
+- `predict_proba` returns columns in `[P(y=0), P(y=1)]` order.
+- `predict` assigns class `1` only when `P(y=1) > 0.5`; an exact tie becomes class `0`.
+
+The initial version does not include native categorical splits, learned missing-value
+directions, multiclass objectives, regression, ranking, GOSS, EFB, DART, early stopping,
+parallel training, or LightGBM model-file compatibility.
+
+## Basic construction
+
+Construction and parameter inspection work before the training routines are complete:
+
+```python
+from src.lite_lightgbm import LiteLightGBM
+
+model = LiteLightGBM(
+    n_estimators=200,
+    learning_rate=0.05,
+    num_leaves=31,
+    class_weight="balanced",
+    random_state=42,
+)
+
+assert model.get_params()["n_estimators"] == 200
+model.set_params(reg_lambda=0.5)
+```
+
+The completed fitting and prediction flow will be:
+
+```python
+model.fit(X_train, y_train)
+raw_scores = model.predict_raw(X_test)
+probabilities = model.predict_proba(X_test)
+labels = model.predict(X_test)
+```
+
+## `LiteLightGBM`
+
+### Constructor parameters
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `n_estimators` | `100` | Number of sequential correction trees. |
+| `learning_rate` | `0.1` | Positive shrinkage applied once to each tree. |
+| `num_leaves` | `31` | Maximum terminal leaves in one tree; at least 2. |
+| `max_depth` | `-1` | Maximum root-to-leaf depth; values at or below 0 mean unlimited. |
+| `min_child_samples` | `20` | Minimum exact row count in both children. |
+| `min_child_weight` | `1e-3` | Minimum summed Hessian in both children. |
+| `min_split_gain` | `0.0` | Gain that a candidate must strictly exceed. |
+| `max_bin` | `255` | Maximum bins learned for one feature. |
+| `min_data_in_bin` | `3` | Target minimum row count represented by one bin. |
+| `reg_alpha` | `0.0` | L1 regularization on leaf corrections. |
+| `reg_lambda` | `0.0` | L2 regularization on leaf corrections. |
+| `colsample_bytree` | `1.0` | Fraction of features sampled once per tree. |
+| `subsample` | `1.0` | Fraction of rows selected when bagging is enabled. |
+| `subsample_freq` | `0` | Number of iterations reusing a row sample; 0 disables bagging. |
+| `class_weight` | `None` | `None`, `"balanced"`, or weights for keys `0` and `1`. |
+| `random_state` | `None` | Seed for a local `numpy.random.Generator`. |
+
+For `class_weight="balanced"`, class `c` receives
+`n_samples / (2 * count_of_class_c)`. Class and sample weights are multiplied together.
+
+### Learned attributes
+
+These attributes exist after a successful `fit`:
+
+| Attribute | Meaning |
+|---|---|
+| `classes_` | Exactly `np.array([0, 1])`. |
+| `n_features_in_` | Number of fitted input columns. |
+| `mapper_` | Learned `BinMapper`. |
+| `trees_` | Ordered list of fitted `DecisionTree` objects. |
+| `init_score_` | Weighted positive-rate log-odds. |
+| `learning_rate_` | Fit-time learning rate used by prediction. |
+| `feature_importances_` | Split counts per original feature. |
+
+Capturing `learning_rate_` ensures that calling `set_params` after fitting does not
+silently change the predictions of an already-fitted model.
+
+### Methods
+
+#### `fit(X, y, sample_weight=None)`
+
+Fits the bin mapper and `n_estimators` sequential leaf-wise trees.
+
+- `X`: finite dense or sparse numeric matrix of shape `(n_samples, n_features)`.
+- `y`: one-dimensional binary target containing both labels.
+- `sample_weight`: optional finite, non-negative vector with positive total weight.
+- Returns the fitted estimator.
+
+Fitting rejects invalid dimensions, non-finite values, invalid labels or weights, and
+invalid hyperparameters before allocating the binned dataset.
+
+#### `predict_raw(X)`
+
+Returns an array of additive logits with shape `(n_samples,)`:
+
+```text
+init_score_ + learning_rate_ * sum(tree_output)
+```
+
+Prediction requires a fitted estimator, finite numeric input, and exactly
+`n_features_in_` columns.
+
+#### `decision_function(X)`
+
+An exact alias for `predict_raw(X)`. It introduces no scikit-learn dependency.
+
+#### `predict_proba(X)`
+
+Applies the stable sigmoid to raw scores and returns an `(n_samples, 2)` array with
+columns `[P(y=0), P(y=1)]`. Class or sample weighting can make these probabilities poorly
+calibrated even when their ranking is useful.
+
+#### `predict(X)`
+
+Returns integer labels. Class `1` requires a probability strictly greater than `0.5`.
+
+#### `get_params(deep=True)`
+
+Returns every constructor parameter. `deep` is accepted for compatibility with external
+cloning tools but has no effect because this estimator contains no nested estimators.
+
+#### `set_params(**params)`
+
+Updates known constructor parameters in place and returns the estimator. Unknown names
+raise `ValueError`. Values are validated by `fit`, not by `set_params`.
+
+#### `__sklearn_tags__()`
+
+Returns locally constructed standard-library metadata identifying a non-pairwise
+classifier. This optional hook lets the project's external CV tooling inspect the
+estimator without the module importing or inheriting from scikit-learn.
+
+## Data containers
+
+### `LiteLightGBMConfig`
+
+An immutable snapshot of all supported constructor parameters. `fit` uses it to pass one
+consistent configuration through binning, histogram, split, and tree routines.
+
+### `BinMapper`
+
+Stores the mapping from original feature values to discrete bins:
+
+- `cut_points[j]`: ascending upper bounds for every non-final bin of feature `j`;
+- `default_bins[j]`: bin assigned to an implicit sparse zero;
+- `n_bins[j]`: number of bins for feature `j`; and
+- `bin_offsets`: exclusive prefix sum used by flattened histograms.
+
+A value is mapped with:
+
+```python
+np.searchsorted(cut_points[j], value, side="left")
+```
+
+A constant feature has one bin and an empty cut-point array.
+
+### `BinnedDataset`
+
+Contains CSR and CSC views of the same quantized matrix:
+
+- `csr` supports row routing and row-oriented operations;
+- `csc` supports per-feature histogram construction; and
+- `mapper` describes the encoding.
+
+Only values whose bin differs from the feature's default bin are stored. A stored bin is
+encoded as `bin_id + 1`, leaving SciPy's implicit zero unambiguous. The `shape` property
+returns `(n_samples, n_features)`.
+
+### `Histogram`
+
+Contains three flattened arrays using `BinMapper.bin_offsets`:
+
+- `gradient_sums`;
+- `hessian_sums`; and
+- exact `counts`.
+
+Each selected feature has its own histogram segment, and every row contributes once to
+that segment, including through the feature's implicit default bin.
+
+### `SplitInfo`
+
+Describes the best valid split for one leaf:
+
+- gain, original feature index, and threshold bin;
+- whether an implicit zero follows the left branch;
+- exact left and right counts; and
+- left and right gradient and Hessian sums.
+
+`default_left` is sparse-zero routing metadata, not a learned missing-value direction.
+
+### `TreeNode`
+
+An array-backed tree node containing its depth, unscaled leaf value, split feature and
+threshold, sparse-zero direction, child indices, derivative sums, sample count, and
+accepted split gain. `is_leaf` is true when both child indices are absent.
+
+### `DecisionTree`
+
+Contains nodes in stable creation order, with the root at index zero, plus the sorted
+original feature indices sampled for that tree. Leaf values are stored before learning-
+rate shrinkage. Temporary row assignments used during construction are not persisted.
+
+## Numerical helper functions
+
+### `sigmoid(raw_scores)`
+
+Computes a stable element-wise logistic sigmoid. Positive and negative inputs use
+separate algebraic forms so logits near `-1000` and `1000` remain finite.
+
+### `soft_threshold(values, reg_alpha)`
+
+Applies the L1 operator:
+
+```text
+sign(values) * max(abs(values) - reg_alpha, 0)
+```
+
+### `binary_gradients_hessians(raw_scores, labels, sample_weight)`
+
+For `p = sigmoid(raw_scores)`:
+
+```text
+gradient = sample_weight * (p - labels)
+hessian = sample_weight * p * (1 - p)
+```
+
+Probabilities are not clipped before derivative calculation. Numerically saturated
+finite logits may therefore have a zero Hessian.
+
+## Binning, histogram, and tree functions
+
+### `fit_bin_mapper(X, config)`
+
+Learns deterministic, frequency-weighted cut points without densifying sparse input.
+Occurrence counts determine quantiles; targets, class weights, and sample weights never
+affect binning. Sparse matrices are canonicalized so equivalent dense, CSR, and CSC
+representations learn the same mapper.
+
+### `transform_bins(X, mapper)`
+
+Maps a matrix through a fitted `BinMapper` and returns encoded CSR and CSC views. Input
+must have the same feature count used to fit the mapper.
+
+### `build_histogram(data, row_indices, feature_indices, gradients, hessians)`
+
+Aggregates per-bin gradient sums, Hessian sums, and exact row counts for one leaf.
+Implicit sparse rows are added to each selected feature's default bin. Construction must
+not densify input or loop over individual samples in Python.
+
+### `find_best_split(...)`
+
+Uses prefix sums to evaluate boundaries between adjacent bins. A valid split must meet
+minimum child count, minimum child Hessian, gain, depth, and leaf-count constraints.
+Exact gain ties prefer the lower feature index and then the lower threshold-bin index.
+
+### `partition_rows(data, row_indices, split)`
+
+Returns disjoint left and right row-index arrays. Bins at or below the threshold route
+left; larger bins route right. Input ordering is preserved within both results.
+
+### `fit_tree(...)`
+
+Fits one Newton-correction tree using a max-priority queue. It repeatedly splits the leaf
+with the highest valid gain until the queue is empty or `num_leaves` is reached. Returned
+leaf corrections are not yet multiplied by the learning rate.
+
+### `predict_tree_raw(tree, data)`
+
+Traverses one tree and returns the unscaled terminal-node correction for every row.
+
+## Numerical safeguards
+
+The module defines `EPSILON = 1e-15`.
+
+- Initial positive rates are clipped to `[EPSILON, 1 - EPSILON]` before taking log-odds.
+- Ordinary probabilities are not clipped before gradient calculation.
+- If a leaf has `H + reg_lambda <= EPSILON`, its value and score are zero.
+- All learned arrays and predictions must remain finite.
+
+## Sparse guarantees
+
+- Project training matrices must never be densified.
+- Sparse inputs are canonicalized by summing duplicates, eliminating explicit zeros,
+  and sorting indices.
+- An implicit sparse zero is an ordinary numeric zero, never a missing value.
+- Dense, CSR, and CSC versions of the same logical matrix must produce identical bins,
+  trees, raw scores, probabilities, and labels.
+
+## Persistence
+
+The estimator uses ordinary Python, NumPy, SciPy, and dataclass state, so project-level
+pickle or joblib persistence can be used externally. A persisted model must reproduce
+raw scores, probabilities, and labels exactly after a round trip. It is not compatible
+with LightGBM model files.
+
+## Further reading
+
+- [`lite_lightgbm.md`](lite_lightgbm.md): implementation contract and acceptance gates.
+- [LightGBM features](https://lightgbm.readthedocs.io/en/stable/Features.html)
+- [LightGBM parameters](https://lightgbm.readthedocs.io/en/stable/Parameters.html)
+- [LightGBM paper](https://papers.nips.cc/paper/6907-lightgbm-a-highly-efficient-gradient-boosting-decision-tree.pdf)
