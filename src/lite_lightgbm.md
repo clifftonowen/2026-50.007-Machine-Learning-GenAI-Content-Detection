@@ -2,9 +2,9 @@
 
 ## Status
 
-`src/lite_lightgbm.py` is currently a skeleton. Its model routines intentionally
-raise `NotImplementedError`. Implement one milestone at a time and do not remove a stub
-until the corresponding tests pass.
+`src/lite_lightgbm.py` is a complete implementation of the documented
+LightGBM-like model. Its model routines implement the stated scope, validation
+rules, and deterministic training flow.
 
 The goal is a deterministic, sparse, histogram-based gradient-boosted tree classifier
 that behaves similarly to the subset of LightGBM used by this project. The goal is not

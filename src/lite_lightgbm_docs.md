@@ -24,10 +24,9 @@ reference.
 
 ## Current status
 
-The module is currently an implementation scaffold. Its data containers, estimator
-constructor, parameter helpers, and optional metadata hook are usable. Numerical,
-binning, training, and prediction routines deliberately raise `NotImplementedError`
-until their corresponding milestones are implemented and tested.
+The module is complete for its documented scope. Its data containers, estimator
+constructor, parameter helpers, metadata hook, numerical routines, binning, training,
+and prediction paths are implemented and tested against the documented invariants.
 
 ## Supported scope
 
@@ -45,7 +44,7 @@ parallel training, or LightGBM model-file compatibility.
 
 ## Basic construction
 
-Construction and parameter inspection work before the training routines are complete:
+Construction and parameter inspection are available independently of fitting:
 
 ```python
 from src.lite_lightgbm import LiteLightGBM
@@ -62,7 +61,7 @@ assert model.get_params()["n_estimators"] == 200
 model.set_params(reg_lambda=0.5)
 ```
 
-The completed fitting and prediction flow will be:
+The fitting and prediction flow is:
 
 ```python
 model.fit(X_train, y_train)
