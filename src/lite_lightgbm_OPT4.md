@@ -1,5 +1,13 @@
 # LiteLightGBM optimization 4: validated internal hot paths
 
+## Status
+
+Complete. `fit_tree` now validates immutable tree inputs once into a private
+trusted context and uses private histogram, split-search, and row-partition
+kernels during leaf growth. The directly callable public helpers retain their
+checked wrappers, including finite derivative, sparse-storage, index, split,
+and histogram validation.
+
 ## Objective
 
 Stop repeating expensive structural validation inside every leaf operation while
@@ -148,4 +156,3 @@ mapper fitting.
   leaf-growth loop.
 - The implementation remains deterministic and uses only NumPy, SciPy, and the
   standard library.
-

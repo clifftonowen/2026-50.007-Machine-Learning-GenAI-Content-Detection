@@ -42,13 +42,21 @@ original feature IDs in `active_features_`. Each tree then allocates histograms
 only for its sampled active features, while stored split IDs and feature
 importances continue to use the original input-column numbering.
 
-Optimizations 4-8 remain implementation plans and do not change current usage:
-validated internal hot paths, vectorized flattened histogram aggregation,
-histogram subtraction, bounded histogram caching, and vectorized split
-evaluation. Their detailed contracts are in the corresponding
+Optimization 4 is complete. Tree fitting validates shared immutable input once
+and then uses private trusted histogram, split-search, and partition kernels;
+the public development helpers remain fully validating checked entry points.
+
+Optimizations 5-8 remain implementation plans and do not change current usage:
+vectorized flattened histogram aggregation, histogram subtraction, bounded
+histogram caching, and vectorized split evaluation. Their detailed contracts
+are in the corresponding
 `lite_lightgbm_OPT4.md` through `lite_lightgbm_OPT8.md` files. Project-scale
 training should wait until this performance-critical sequence is implemented
 and benchmarked.
+
+Profiling identifies scalar split evaluation as the next performance priority,
+so OPT8 may be implemented before OPT5-7; those optimizations are not logical
+prerequisites for it.
 
 ## Import and module layout
 
@@ -352,6 +360,7 @@ and CSR canonicalization runs to completion before both data dtypes are verified
 Aggregates per-bin gradient sums, Hessian sums, and exact row counts for one leaf.
 Implicit sparse rows are added to each selected feature's default bin. Construction must
 not densify input or loop over individual samples in Python.
+Direct calls require finite, row-aligned gradient and Hessian arrays.
 
 ### `find_best_split(...)`
 
@@ -369,6 +378,9 @@ left; larger bins route right. Input ordering is preserved within both results.
 Fits one Newton-correction tree using a max-priority queue. It repeatedly splits the leaf
 with the highest valid gain until the queue is empty or `num_leaves` is reached. Returned
 leaf corrections are not yet multiplied by the learning rate.
+Directly supplied `BinnedDataset` objects must contain canonical CSR and CSC storage with
+valid sparse structure and mapper-compatible encoded bins; `transform_bins` produces this
+form.
 
 ### `predict_tree_raw(tree, data)`
 

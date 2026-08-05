@@ -234,6 +234,223 @@ class DecisionTree:
     feature_indices: np.ndarray | None = None
 
 
+@dataclass(slots=True)
+class _TreeContext:
+    """Validated immutable inputs shared by one tree's trusted kernels.
+
+    This is intentionally private: public helper calls continue to perform
+    their full argument checks, while :func:`fit_tree` creates one context and
+    reuses its canonical sparse views and normalized arrays for every leaf.
+    """
+
+    data: BinnedDataset
+    csr: sp.csr_matrix
+    csc: sp.csc_matrix
+    mapper: BinMapper
+    n_samples: int
+    n_features: int
+    n_bins: np.ndarray
+    defaults: np.ndarray
+    offsets: np.ndarray
+    gradients: np.ndarray
+    hessians: np.ndarray
+    rows: np.ndarray
+    features: np.ndarray
+    layout: HistogramLayout
+    num_leaves: int
+    max_depth: int
+    min_child_samples: int
+    min_child_weight: float
+    min_split_gain: float
+    reg_alpha: float
+    reg_lambda: float
+
+
+def _normalize_tree_integer_metadata(values: np.ndarray, name: str) -> np.ndarray:
+    """Normalize integer-valued metadata for the trusted tree context."""
+    values = np.asarray(values)
+    dtype = values.dtype
+    if (
+        not np.issubdtype(dtype, np.number)
+        or np.issubdtype(dtype, np.complexfloating)
+        or not np.isfinite(values).all()
+        or (
+            np.issubdtype(dtype, np.floating)
+            and np.any(values != np.trunc(values))
+        )
+    ):
+        raise ValueError(f"{name} must be finite integer-valued numeric values")
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            normalized = np.asarray(values, dtype=np.int64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be representable as signed int64 values") from exc
+    if np.issubdtype(dtype, np.unsignedinteger) and np.any(normalized < 0):
+        raise ValueError(f"{name} must be representable as signed int64 values")
+    if np.issubdtype(dtype, np.floating):
+        with np.errstate(over="ignore", invalid="ignore"):
+            round_trip = normalized.astype(dtype)
+        if np.any(round_trip != values):
+            raise ValueError(f"{name} must be representable as signed int64 values")
+    return normalized
+
+
+def _validate_tree_storage(
+    data: BinnedDataset,
+    n_samples: int,
+    n_features: int,
+) -> tuple[sp.csr_matrix, sp.csc_matrix, BinMapper, np.ndarray, np.ndarray, np.ndarray]:
+    """Validate sparse storage and mapper metadata once at tree entry."""
+    try:
+        mapper = data.mapper
+        csr = data.csr
+        csc = data.csc
+        raw_n_bins = np.asarray(mapper.n_bins)
+        raw_defaults = np.asarray(mapper.default_bins)
+        raw_offsets = np.asarray(mapper.bin_offsets)
+        cut_points = mapper.cut_points
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("data must contain a valid binned dataset") from exc
+    if (
+        not sp.isspmatrix_csr(csr)
+        or not sp.isspmatrix_csc(csc)
+        or tuple(csr.shape) != (n_samples, n_features)
+        or tuple(csc.shape) != (n_samples, n_features)
+    ):
+        raise ValueError("data sparse views must match their declared shape")
+    if (
+        raw_n_bins.ndim != 1
+        or raw_n_bins.size != n_features
+        or raw_defaults.ndim != 1
+        or raw_defaults.size != n_features
+        or raw_offsets.ndim != 1
+        or raw_offsets.size != n_features + 1
+    ):
+        raise ValueError("data mapper has incompatible feature metadata")
+    try:
+        cut_count = len(cut_points)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("mapper must contain one cut-point array per feature") from exc
+    if cut_count != n_features:
+        raise ValueError("mapper must contain one cut-point array per feature")
+
+    n_bins = _normalize_tree_integer_metadata(raw_n_bins, "data mapper n_bins")
+    defaults = _normalize_tree_integer_metadata(raw_defaults, "data mapper default bins")
+    offsets = _normalize_tree_integer_metadata(raw_offsets, "data mapper bin offsets")
+    if int(offsets[0]) != 0 or np.any(offsets < 0) or np.any(offsets[1:] < offsets[:-1]):
+        raise ValueError("data mapper bin offsets must be a non-negative prefix sum")
+    if np.any(n_bins <= 0) or np.any(np.diff(offsets) != n_bins):
+        raise ValueError("data mapper bin offsets must match positive n_bins")
+    if np.any(defaults < 0) or np.any(defaults >= n_bins):
+        raise ValueError("data mapper default bins are outside feature bin ranges")
+    expected_total = sum(int(value) for value in n_bins)
+    if int(offsets[-1]) != expected_total:
+        raise ValueError("data mapper final bin offset is inconsistent")
+    for feature, cuts in enumerate(cut_points):
+        try:
+            normalized_cuts = np.asarray(cuts, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("mapper cut points must be numeric arrays") from exc
+        if (
+            normalized_cuts.ndim != 1
+            or normalized_cuts.size != int(n_bins[feature]) - 1
+            or not np.isfinite(normalized_cuts).all()
+            or (
+                normalized_cuts.size > 1
+                and np.any(normalized_cuts[1:] < normalized_cuts[:-1])
+            )
+        ):
+            raise ValueError("mapper cut points do not match n_bins")
+
+    # Validate the row-oriented view's structural/canonical invariants once.
+    # Histogram and routing kernels use CSC for indexed feature access, but a
+    # malformed CSR companion must not be allowed to pass tree entry silently.
+    try:
+        csr_indptr = np.asarray(csr.indptr)
+        csr_indices = np.asarray(csr.indices)
+        csr_data = np.asarray(csr.data)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("data CSR view has invalid sparse storage") from exc
+    if (
+        csr_indptr.ndim != 1
+        or csr_indptr.size != n_samples + 1
+        or not np.issubdtype(csr_indptr.dtype, np.integer)
+        or csr_indices.ndim != 1
+        or csr_data.ndim != 1
+        or csr_indices.size != csr_data.size
+        or not np.issubdtype(csr_indices.dtype, np.integer)
+    ):
+        raise ValueError("data CSR view has invalid sparse storage")
+    if csr_indptr.size and (
+        np.any(csr_indptr < 0)
+        or np.any(csr_indptr[1:] < csr_indptr[:-1])
+        or int(csr_indptr[-1]) != int(csr_data.size)
+    ):
+        raise ValueError("data CSR row pointers are invalid")
+    if csr_indices.size and (
+        np.any(csr_indices < 0) or np.any(csr_indices >= n_features)
+    ):
+        raise ValueError("data CSR column indices are outside the dataset range")
+    # Compare adjacent stored columns in one pass, masking the boundaries
+    # between rows so entries from separate rows are never compared.  Row
+    # labels are looked up only for stored positions, keeping temporary
+    # allocations bounded by nnz rather than by the number of (possibly empty)
+    # rows.
+    if csr_indices.size > 1:
+        positions = np.arange(csr_indices.size, dtype=np.intp)
+        row_labels = np.searchsorted(csr_indptr, positions, side="right")
+        if np.any(
+            (csr_indices[1:] <= csr_indices[:-1])
+            & (row_labels[1:] == row_labels[:-1])
+        ):
+            raise ValueError("data CSR rows must have sorted unique columns")
+
+    try:
+        indptr = np.asarray(csc.indptr)
+        indices = np.asarray(csc.indices)
+        encoded_values = np.asarray(csc.data)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("data CSC view has invalid sparse storage") from exc
+    if (
+        indptr.ndim != 1
+        or indptr.size != n_features + 1
+        or not np.issubdtype(indptr.dtype, np.integer)
+        or indices.ndim != 1
+        or encoded_values.ndim != 1
+        or indices.size != encoded_values.size
+        or not np.issubdtype(indices.dtype, np.integer)
+    ):
+        raise ValueError("data CSC view has invalid sparse storage")
+    if indptr.size and (
+        np.any(indptr < 0)
+        or np.any(indptr[1:] < indptr[:-1])
+        or int(indptr[-1]) != int(encoded_values.size)
+    ):
+        raise ValueError("data CSC column pointers are invalid")
+    if indices.size and (np.any(indices < 0) or np.any(indices >= n_samples)):
+        raise ValueError("data CSC row indices are outside the dataset range")
+    encoded = _normalize_tree_integer_metadata(encoded_values, "data CSC encoded bins")
+    for feature in range(n_features):
+        start, end = int(indptr[feature]), int(indptr[feature + 1])
+        column_rows = indices[start:end]
+        if column_rows.size > 1 and np.any(column_rows[1:] <= column_rows[:-1]):
+            raise ValueError("data CSC columns must have sorted unique rows")
+    # ``indptr`` describes one feature segment per column.  Label only the
+    # stored values with their containing feature, then index the corresponding
+    # bin limits.  This keeps temporaries bounded by nnz instead of allocating
+    # an intermediate repeat-count array across all features (empty segments
+    # naturally contribute no values).
+    if encoded.size:
+        encoded_positions = np.arange(encoded.size, dtype=np.intp)
+        feature_labels = (
+            np.searchsorted(indptr, encoded_positions, side="right") - 1
+        )
+        segment_bin_limits = n_bins[feature_labels]
+        if np.any(encoded < 1) or np.any(encoded > segment_bin_limits):
+            raise ValueError("data CSC encoded bins are outside mapper ranges")
+    return csr, csc, mapper, n_bins, defaults, offsets
+
+
 def build_histogram(
     data: BinnedDataset,
     row_indices: np.ndarray,
@@ -387,7 +604,44 @@ def build_histogram(
         raise ValueError(
             "gradients and hessians must each have one value per dataset row"
         )
+    if not np.isfinite(gradient_values).all() or not np.isfinite(
+        hessian_values
+    ).all():
+        raise ValueError("gradients and hessians must be finite")
 
+    return _build_histogram_validated(
+        data=data,
+        rows=rows,
+        features=features,
+        gradients=gradient_values,
+        hessians=hessian_values,
+        layout=layout,
+        offsets=raw_offsets,
+        n_bins=raw_n_bins,
+        defaults=raw_defaults,
+        total_bins=total_bins,
+    )
+
+
+def _build_histogram_validated(
+    *,
+    data: BinnedDataset,
+    rows: np.ndarray,
+    features: np.ndarray,
+    gradients: np.ndarray,
+    hessians: np.ndarray,
+    layout: HistogramLayout | None,
+    offsets: np.ndarray,
+    n_bins: np.ndarray,
+    defaults: np.ndarray,
+    total_bins: int,
+) -> Histogram:
+    """Build a histogram from normalized, validated internal state.
+
+    ``build_histogram`` owns all user-facing checks.  Callers of this kernel
+    must provide signed integer indices, finite float arrays, canonical CSC
+    storage, and mapper/layout metadata that already passed those checks.
+    """
     gradient_sums = np.zeros(total_bins, dtype=np.float64)
     hessian_sums = np.zeros(total_bins, dtype=np.float64)
     counts = np.zeros(total_bins, dtype=np.int64)
@@ -399,37 +653,31 @@ def build_histogram(
             layout=layout,
         )
 
-    # Unique rows plus multiplicities lets this routine remain well-defined
-    # even if a caller supplies a repeated row index.  Normal tree partitions
-    # are unique, so this preprocessing is linear in the selected leaf size and
-    # avoids any Python loop over samples.
+    # Unique rows plus multiplicities preserves direct-helper duplicate-row
+    # behavior while keeping the trusted tree path free of repeated checks.
     unique_rows, row_multiplicity = np.unique(rows, return_counts=True)
-    leaf_gradient = float(np.sum(gradient_values[rows], dtype=np.float64))
-    leaf_hessian = float(np.sum(hessian_values[rows], dtype=np.float64))
+    leaf_gradient = float(np.sum(gradients[rows], dtype=np.float64))
+    leaf_hessian = float(np.sum(hessians[rows], dtype=np.float64))
     csc = data.csc
 
     for local_slot, feature in enumerate(features):
         feature_index = int(feature)
         if layout is None:
-            start = int(raw_offsets[feature_index])
-            end = int(raw_offsets[feature_index + 1])
-            default_bin = int(raw_defaults[feature_index])
+            start = int(offsets[feature_index])
+            end = int(offsets[feature_index + 1])
+            default_bin = int(defaults[feature_index])
         else:
             start = int(layout.bin_offsets[local_slot])
             end = int(layout.bin_offsets[local_slot + 1])
             default_bin = int(layout.default_bins[local_slot])
         n_feature_bins = end - start
-        if n_feature_bins <= 0:
-            # A malformed mapper should not make indexed writes wrap around.
+        if n_feature_bins <= 0:  # pragma: no cover - guarded by validation
             raise ValueError("data mapper must assign at least one bin per feature")
 
         column_start = int(csc.indptr[feature_index])
         column_end = int(csc.indptr[feature_index + 1])
         column_rows = np.asarray(csc.indices[column_start:column_end], dtype=np.int64)
         if column_rows.size:
-            # CSC rows are sorted by transform_bins.  searchsorted against the
-            # sorted unique selected rows provides vectorized membership and
-            # naturally preserves multiplicity for repeated row_indices.
             positions = np.searchsorted(unique_rows, column_rows, side="left")
             in_range = positions < unique_rows.size
             if np.any(in_range):
@@ -450,28 +698,20 @@ def build_histogram(
                 bin_ids = encoded_bins - np.int64(1)
                 if np.any(bin_ids < 0) or np.any(bin_ids >= n_feature_bins):
                     raise ValueError("binned sparse values are outside mapper bin range")
-                gradient_contrib = gradient_values[matched_rows] * multiplicities
-                hessian_contrib = hessian_values[matched_rows] * multiplicities
-                np.add.at(
-                    gradient_sums,
-                    start + bin_ids,
-                    gradient_contrib,
-                )
-                np.add.at(
-                    hessian_sums,
-                    start + bin_ids,
-                    hessian_contrib,
-                )
+                gradient_contrib = gradients[matched_rows] * multiplicities
+                hessian_contrib = hessians[matched_rows] * multiplicities
+                np.add.at(gradient_sums, start + bin_ids, gradient_contrib)
+                np.add.at(hessian_sums, start + bin_ids, hessian_contrib)
                 np.add.at(counts, start + bin_ids, multiplicities)
 
         # Sparse storage omits rows in the feature's default bin.  Whatever
-        # selected rows were not represented explicitly therefore contribute
-        # their sufficient-statistic remainder to that one bin.
+        # selected rows were not represented explicitly contribute the
+        # sufficient-statistic remainder to that one bin.
         segment = slice(start, end)
         represented_gradient = float(np.sum(gradient_sums[segment], dtype=np.float64))
         represented_hessian = float(np.sum(hessian_sums[segment], dtype=np.float64))
         represented_count = int(np.sum(counts[segment], dtype=np.int64))
-        if default_bin < 0 or default_bin >= n_feature_bins:
+        if default_bin < 0 or default_bin >= n_feature_bins:  # pragma: no cover
             raise ValueError("data mapper default bin is outside feature bin range")
         default_offset = start + default_bin
         gradient_sums[default_offset] += leaf_gradient - represented_gradient
@@ -704,24 +944,66 @@ def find_best_split(
     parent_hessian_value = float(normalized_parent[1])
     parent_count_value = int(normalized_parent[2])
 
-    # Score uses the same L1/L2 regularized sufficient-statistic formula as leaf
-    # values.  A non-positive denominator is deliberately assigned score zero,
-    # including saturated zero-curvature leaves.
-    parent_denominator = parent_hessian_value + reg_lambda
+    return _find_best_split_validated(
+        gradients=gradients,
+        hessians=hessians,
+        counts=counts,
+        features=features,
+        parent_gradient=parent_gradient_value,
+        parent_hessian=parent_hessian_value,
+        parent_count=parent_count_value,
+        n_bins=n_bins,
+        offsets=offsets,
+        defaults=defaults,
+        layout=layout,
+        min_child_samples=min_child_samples,
+        min_child_weight=min_child_weight,
+        min_split_gain=min_split_gain,
+        reg_alpha=reg_alpha,
+        reg_lambda=reg_lambda,
+    )
+
+
+def _find_best_split_validated(
+    *,
+    gradients: np.ndarray,
+    hessians: np.ndarray,
+    counts: np.ndarray,
+    features: np.ndarray,
+    parent_gradient: float,
+    parent_hessian: float,
+    parent_count: int,
+    n_bins: np.ndarray,
+    offsets: np.ndarray,
+    defaults: np.ndarray,
+    layout: HistogramLayout | None,
+    min_child_samples: int,
+    min_child_weight: float,
+    min_split_gain: float,
+    reg_alpha: float,
+    reg_lambda: float,
+) -> SplitInfo | None:
+    """Search split candidates from normalized histogram/context state."""
+    parent_denominator = parent_hessian + reg_lambda
     if parent_denominator > EPSILON:
-        parent_thresholded = float(soft_threshold(parent_gradient_value, reg_alpha))
+        parent_thresholded = float(soft_threshold(parent_gradient, reg_alpha))
         parent_score = (parent_thresholded * parent_thresholded) / parent_denominator
     else:
         parent_score = 0.0
 
     best: SplitInfo | None = None
     best_gain = -np.inf
-    best_feature = n_features
+    best_feature = int(n_bins.size)
     best_threshold = int(np.max(n_bins)) if n_bins.size else 1
 
     if layout is None:
         feature_segments = (
-            (int(feature), int(offsets[int(feature)]), int(offsets[int(feature) + 1]), int(defaults[int(feature)]))
+            (
+                int(feature),
+                int(offsets[int(feature)]),
+                int(offsets[int(feature) + 1]),
+                int(defaults[int(feature)]),
+            )
             for feature in features
         )
     else:
@@ -740,48 +1022,40 @@ def find_best_split(
         if feature_bin_count <= 1:
             continue
 
-        # Prefix sums turn each boundary into O(1) sufficient-statistic lookup;
-        # the final bin is intentionally never used as a threshold.
+        # Keep prefix accumulation and threshold visitation in the exact
+        # order used by the checked implementation.
         gradient_prefix = np.cumsum(gradients[start:end], dtype=np.float64)
         hessian_prefix = np.cumsum(hessians[start:end], dtype=np.float64)
         count_prefix = np.cumsum(counts[start:end], dtype=np.int64)
         for threshold in range(feature_bin_count - 1):
             left_count = int(count_prefix[threshold])
-            right_count = parent_count_value - left_count
+            right_count = parent_count - left_count
             if left_count < min_child_samples or right_count < min_child_samples:
                 continue
 
             left_gradient = float(gradient_prefix[threshold])
             left_hessian = float(hessian_prefix[threshold])
-            right_gradient = parent_gradient_value - left_gradient
-            right_hessian = parent_hessian_value - left_hessian
-            if (
-                left_hessian < min_child_weight
-                or right_hessian < min_child_weight
-            ):
+            right_gradient = parent_gradient - left_gradient
+            right_hessian = parent_hessian - left_hessian
+            if left_hessian < min_child_weight or right_hessian < min_child_weight:
                 continue
 
             left_denominator = left_hessian + reg_lambda
             right_denominator = right_hessian + reg_lambda
             if left_denominator > EPSILON:
                 left_thresholded = float(soft_threshold(left_gradient, reg_alpha))
-                left_score = (
-                    left_thresholded * left_thresholded
-                ) / left_denominator
+                left_score = (left_thresholded * left_thresholded) / left_denominator
             else:
                 left_score = 0.0
             if right_denominator > EPSILON:
                 right_thresholded = float(soft_threshold(right_gradient, reg_alpha))
-                right_score = (
-                    right_thresholded * right_thresholded
-                ) / right_denominator
+                right_score = (right_thresholded * right_thresholded) / right_denominator
             else:
                 right_score = 0.0
 
             gain = float(left_score + right_score - parent_score)
             if not np.isfinite(gain) or gain <= min_split_gain:
                 continue
-
             is_better = (
                 best is None
                 or gain > best_gain
@@ -789,16 +1063,12 @@ def find_best_split(
                     gain == best_gain
                     and (
                         feature < best_feature
-                        or (
-                            feature == best_feature
-                            and threshold < best_threshold
-                        )
+                        or (feature == best_feature and threshold < best_threshold)
                     )
                 )
             )
             if not is_better:
                 continue
-
             best_gain = gain
             best_feature = feature
             best_threshold = threshold
@@ -1049,12 +1319,34 @@ def partition_rows(
         if np.unique(stored_rows).size != stored_rows.size:
             raise ValueError("data CSC view contains duplicate feature entries")
 
+    return _partition_rows_validated(
+        csc=csc,
+        rows=rows,
+        feature=feature,
+        threshold=threshold,
+        default_left=default_left,
+    )
+
+
+def _partition_rows_validated(
+    *,
+    csc: sp.csc_matrix,
+    rows: np.ndarray,
+    feature: int,
+    threshold: int,
+    default_left: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Route rows using canonical CSC/split state after wrapper validation."""
     if rows.size == 0:
         return rows.copy(), rows.copy()
 
+    column_start = int(csc.indptr[feature])
+    column_end = int(csc.indptr[feature + 1])
+    stored_rows = np.asarray(csc.indices[column_start:column_end], dtype=np.int64)
+    encoded = np.asarray(csc.data[column_start:column_end], dtype=np.int64)
+
     # Map each distinct selected row once, then expand through ``inverse``.
-    # This preserves the caller's ordering (and any repeated row indices)
-    # without a Python loop over samples.
+    # This preserves ordering and duplicate-row behavior without a Python loop.
     unique_rows, inverse = np.unique(rows, return_inverse=True)
     go_left_unique = np.full(unique_rows.size, default_left, dtype=bool)
     if stored_rows.size and unique_rows.size:
@@ -1094,6 +1386,12 @@ def fit_tree(
         raise ValueError("data must contain a valid binned dataset") from exc
     if n_samples < 0 or n_features < 0:
         raise ValueError("data must have non-negative dimensions")
+    # Validate canonical sparse storage and mapper metadata once.  Every
+    # trusted leaf kernel below receives this normalized context and therefore
+    # does not repeat structural checks for each child.
+    csr, csc, mapper, n_bins, defaults, offsets = _validate_tree_storage(
+        data, n_samples, n_features
+    )
 
     try:
         raw_rows = np.asarray(row_indices)
@@ -1130,7 +1428,7 @@ def fit_tree(
     features = np.sort(features.copy())
     # Build one immutable compact histogram layout for this tree.  All leaf
     # histograms below share this object; no per-leaf reverse lookup is built.
-    layout = _make_histogram_layout(data.mapper, features)
+    layout = _make_histogram_layout(mapper, features)
 
     try:
         gradient_values = np.asarray(gradients, dtype=np.float64)
@@ -1198,6 +1496,30 @@ def fit_tree(
     max_depth = int(raw_max_depth)
     min_child_samples = int(min_child_samples)
 
+    context = _TreeContext(
+        data=data,
+        csr=csr,
+        csc=csc,
+        mapper=mapper,
+        n_samples=n_samples,
+        n_features=n_features,
+        n_bins=n_bins,
+        defaults=defaults,
+        offsets=offsets,
+        gradients=gradient_values,
+        hessians=hessian_values,
+        rows=rows,
+        features=features,
+        layout=layout,
+        num_leaves=num_leaves,
+        max_depth=max_depth,
+        min_child_samples=min_child_samples,
+        min_child_weight=float(min_child_weight),
+        min_split_gain=float(min_split_gain),
+        reg_alpha=float(reg_alpha),
+        reg_lambda=float(reg_lambda),
+    )
+
     root_gradient = float(np.sum(gradient_values[rows], dtype=np.float64))
     root_hessian = float(np.sum(hessian_values[rows], dtype=np.float64))
     root_denominator = root_hessian + reg_lambda
@@ -1224,23 +1546,36 @@ def fit_tree(
     # tie-break.  The SplitInfo object is never compared because node indices
     # are unique for every live candidate.
     queue: list[tuple[float, int, int, int, SplitInfo]] = []
-    root_histogram = build_histogram(
-        data,
-        rows,
-        features,
-        gradient_values,
-        hessian_values,
-        layout=layout,
+    root_histogram = _build_histogram_validated(
+        data=context.data,
+        rows=rows,
+        features=context.features,
+        gradients=context.gradients,
+        hessians=context.hessians,
+        layout=context.layout,
+        offsets=context.offsets,
+        n_bins=context.n_bins,
+        defaults=context.defaults,
+        total_bins=int(context.layout.bin_offsets[-1]),
     )
     if max_depth <= 0 or 0 < max_depth:
-        root_split = find_best_split(
-            root_histogram,
-            features,
-            root_gradient,
-            root_hessian,
-            int(rows.size),
-            data.mapper,
-            config,
+        root_split = _find_best_split_validated(
+            gradients=root_histogram.gradient_sums,
+            hessians=root_histogram.hessian_sums,
+            counts=root_histogram.counts,
+            features=context.features,
+            parent_gradient=root_gradient,
+            parent_hessian=root_hessian,
+            parent_count=int(rows.size),
+            n_bins=context.n_bins,
+            offsets=context.offsets,
+            defaults=context.defaults,
+            layout=context.layout,
+            min_child_samples=context.min_child_samples,
+            min_child_weight=context.min_child_weight,
+            min_split_gain=context.min_split_gain,
+            reg_alpha=context.reg_alpha,
+            reg_lambda=context.reg_lambda,
         )
         if root_split is not None:
             heapq.heappush(
@@ -1265,7 +1600,13 @@ def fit_tree(
         if max_depth > 0 and parent.depth >= max_depth:
             continue
 
-        left_rows, right_rows = partition_rows(data, current_rows, split)
+        left_rows, right_rows = _partition_rows_validated(
+            csc=context.csc,
+            rows=current_rows,
+            feature=int(split.feature),
+            threshold=int(split.threshold_bin),
+            default_left=bool(split.default_left),
+        )
         left_gradient = float(split.left_gradient)
         left_hessian = float(split.left_hessian)
         right_gradient = float(split.right_gradient)
@@ -1319,22 +1660,35 @@ def fit_tree(
         if max_depth > 0 and child_depth >= max_depth:
             continue
 
-        left_histogram = build_histogram(
-            data,
-            left_rows,
-            features,
-            gradient_values,
-            hessian_values,
-            layout=layout,
+        left_histogram = _build_histogram_validated(
+            data=context.data,
+            rows=left_rows,
+            features=context.features,
+            gradients=context.gradients,
+            hessians=context.hessians,
+            layout=context.layout,
+            offsets=context.offsets,
+            n_bins=context.n_bins,
+            defaults=context.defaults,
+            total_bins=int(context.layout.bin_offsets[-1]),
         )
-        left_split = find_best_split(
-            left_histogram,
-            features,
-            left_gradient,
-            left_hessian,
-            int(left_rows.size),
-            data.mapper,
-            config,
+        left_split = _find_best_split_validated(
+            gradients=left_histogram.gradient_sums,
+            hessians=left_histogram.hessian_sums,
+            counts=left_histogram.counts,
+            features=context.features,
+            parent_gradient=left_gradient,
+            parent_hessian=left_hessian,
+            parent_count=int(left_rows.size),
+            n_bins=context.n_bins,
+            offsets=context.offsets,
+            defaults=context.defaults,
+            layout=context.layout,
+            min_child_samples=context.min_child_samples,
+            min_child_weight=context.min_child_weight,
+            min_split_gain=context.min_split_gain,
+            reg_alpha=context.reg_alpha,
+            reg_lambda=context.reg_lambda,
         )
         if left_split is not None:
             heapq.heappush(
@@ -1348,22 +1702,35 @@ def fit_tree(
                 ),
             )
 
-        right_histogram = build_histogram(
-            data,
-            right_rows,
-            features,
-            gradient_values,
-            hessian_values,
-            layout=layout,
+        right_histogram = _build_histogram_validated(
+            data=context.data,
+            rows=right_rows,
+            features=context.features,
+            gradients=context.gradients,
+            hessians=context.hessians,
+            layout=context.layout,
+            offsets=context.offsets,
+            n_bins=context.n_bins,
+            defaults=context.defaults,
+            total_bins=int(context.layout.bin_offsets[-1]),
         )
-        right_split = find_best_split(
-            right_histogram,
-            features,
-            right_gradient,
-            right_hessian,
-            int(right_rows.size),
-            data.mapper,
-            config,
+        right_split = _find_best_split_validated(
+            gradients=right_histogram.gradient_sums,
+            hessians=right_histogram.hessian_sums,
+            counts=right_histogram.counts,
+            features=context.features,
+            parent_gradient=right_gradient,
+            parent_hessian=right_hessian,
+            parent_count=int(right_rows.size),
+            n_bins=context.n_bins,
+            offsets=context.offsets,
+            defaults=context.defaults,
+            layout=context.layout,
+            min_child_samples=context.min_child_samples,
+            min_child_weight=context.min_child_weight,
+            min_split_gain=context.min_split_gain,
+            reg_alpha=context.reg_alpha,
+            reg_lambda=context.reg_lambda,
         )
         if right_split is not None:
             heapq.heappush(
