@@ -31,6 +31,7 @@ from .lite_lightgbm_dep.binning import (
 )
 from .lite_lightgbm_dep.tree import (
     Histogram,
+    HistogramLayout,
     SplitInfo,
     TreeNode,
     DecisionTree,
@@ -40,6 +41,63 @@ from .lite_lightgbm_dep.tree import (
     fit_tree,
     predict_tree_raw,
 )
+
+
+def _active_feature_indices(
+    data: BinnedDataset,
+    min_child_samples: int,
+) -> np.ndarray:
+    """Return count-splittable original features from one canonical CSC view."""
+    try:
+        n_samples, n_features = (int(data.shape[0]), int(data.shape[1]))
+        csc = data.csc
+        mapper = data.mapper
+        n_bins = np.asarray(mapper.n_bins, dtype=np.int64)
+        defaults = np.asarray(mapper.default_bins, dtype=np.int64)
+    except (AttributeError, TypeError, ValueError, IndexError) as exc:
+        raise ValueError("binned data must contain valid feature metadata") from exc
+    if (
+        n_bins.ndim != 1
+        or defaults.ndim != 1
+        or n_bins.size != n_features
+        or defaults.size != n_features
+        or tuple(csc.shape) != (n_samples, n_features)
+    ):
+        raise ValueError("binned data mapper has incompatible feature metadata")
+
+    # ``transform_bins`` stores only non-default entries.  Decode those bins,
+    # count them exactly, then add all implicit rows to the feature's default
+    # bin.  This is a one-time count-only pass and never allocates a dense
+    # sample-by-feature matrix or computes gradient/Hessian statistics.
+    active: list[int] = []
+    for feature in range(n_features):
+        feature_bin_count = int(n_bins[feature])
+        if feature_bin_count <= 1:
+            continue
+        start = int(csc.indptr[feature])
+        end = int(csc.indptr[feature + 1])
+        encoded = np.asarray(csc.data[start:end], dtype=np.int64)
+        if encoded.size and (np.any(encoded <= 0) or np.any(encoded > feature_bin_count)):
+            raise ValueError("binned sparse values are outside mapper bin range")
+        explicit_bins = encoded - np.int64(1)
+        counts = np.bincount(explicit_bins, minlength=feature_bin_count)
+        if counts.size != feature_bin_count:
+            # ``encoded`` was range-checked above; retain this guard for
+            # malformed sparse implementations that return an unexpected dtype.
+            raise ValueError("binned sparse values are outside mapper bin range")
+        default_bin = int(defaults[feature])
+        if default_bin < 0 or default_bin >= feature_bin_count:
+            raise ValueError("mapper default bins are outside feature bin ranges")
+        counts[default_bin] += np.int64(n_samples - encoded.size)
+        prefix = np.cumsum(counts[:-1], dtype=np.int64)
+        if np.any(
+            (prefix >= int(min_child_samples))
+            & ((n_samples - prefix) >= int(min_child_samples))
+        ):
+            active.append(feature)
+
+    return np.asarray(active, dtype=np.int64)
+
 
 class LiteLightGBM:
     """From-scratch histogram gradient-boosted binary classifier.
@@ -430,6 +488,10 @@ class LiteLightGBM:
         # path above has succeeded.
         mapper = fit_bin_mapper(X, config)
         binned = transform_bins(X, mapper)
+        active_features = _active_feature_indices(
+            binned,
+            normalized_integers["min_child_samples"],
+        )
         positive_rate = float(
             np.sum(effective_weights * labels_float, dtype=np.float64)
         ) / total_weight
@@ -448,14 +510,22 @@ class LiteLightGBM:
         for iteration in range(n_estimators):
             if feature_fraction < 1.0:
                 feature_count = max(1, int(np.floor(feature_fraction * n_features)))
-                feature_indices = np.sort(
+                sampled_features = np.sort(
                     np.asarray(
                         rng.choice(n_features, size=feature_count, replace=False),
                         dtype=np.int64,
                     )
                 )
+                # Draw from the original feature range first to preserve the
+                # seeded RNG stream, then intersect with the one-time safe
+                # active-feature set.  Both inputs are sorted and unique.
+                feature_indices = np.intersect1d(
+                    sampled_features,
+                    active_features,
+                    assume_unique=True,
+                )
             else:
-                feature_indices = np.arange(n_features, dtype=np.int64)
+                feature_indices = np.asarray(active_features, dtype=np.int64).copy()
 
             if subsample_fraction < 1.0 and subsample_frequency > 0:
                 if iteration % subsample_frequency == 0 or previous_rows is None:
@@ -502,6 +572,7 @@ class LiteLightGBM:
         self.init_score_ = init_score
         self.learning_rate_ = learning_rate
         self.feature_importances_ = feature_importances
+        self.active_features_ = np.asarray(active_features, dtype=np.int64)
         return self
 
     def predict_raw(self, X: Matrix) -> np.ndarray:

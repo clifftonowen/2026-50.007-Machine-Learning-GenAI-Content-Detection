@@ -12,6 +12,172 @@ import scipy.sparse as sp
 from .binning import BinnedDataset, BinMapper
 from .core import EPSILON, LiteLightGBMConfig, soft_threshold
 
+
+@dataclass(frozen=True, slots=True)
+class HistogramLayout:
+    """Immutable tree-local flattened histogram layout.
+
+    ``feature_indices`` contains sorted original feature numbers while the
+    remaining arrays describe the compact local histogram segments.  The
+    reverse lookup uses ``-1`` for features not selected for this tree.
+    Arrays are copied and marked read-only so every histogram in a tree can
+    safely share one layout object without accidental mutation.
+    """
+
+    feature_indices: np.ndarray
+    n_bins: np.ndarray
+    default_bins: np.ndarray
+    bin_offsets: np.ndarray
+    feature_to_local: np.ndarray
+
+    def __post_init__(self) -> None:
+        try:
+            features = np.asarray(self.feature_indices)
+            n_bins = np.asarray(self.n_bins)
+            defaults = np.asarray(self.default_bins)
+            offsets = np.asarray(self.bin_offsets)
+            feature_to_local = np.asarray(self.feature_to_local)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("histogram layout must contain numeric arrays") from exc
+
+        arrays = (
+            (features, "feature_indices"),
+            (n_bins, "n_bins"),
+            (defaults, "default_bins"),
+            (offsets, "bin_offsets"),
+            (feature_to_local, "feature_to_local"),
+        )
+        for values, name in arrays:
+            if values.ndim != 1:
+                raise ValueError(f"histogram layout {name} must be one-dimensional")
+            if not np.issubdtype(values.dtype, np.integer):
+                raise ValueError(f"histogram layout {name} must be integer-valued")
+
+        if features.size and np.any(features < 0):
+            raise ValueError("histogram layout feature indices must be non-negative")
+        if features.size > 1 and np.any(features[1:] <= features[:-1]):
+            raise ValueError(
+                "histogram layout feature indices must be sorted and unique"
+            )
+        if n_bins.size != features.size or defaults.size != features.size:
+            raise ValueError("histogram layout feature arrays have incompatible sizes")
+        if offsets.size != features.size + 1 or int(offsets[0]) != 0:
+            raise ValueError("histogram layout bin offsets have incompatible size")
+        if np.any(offsets[1:] < offsets[:-1]) or np.any(n_bins <= 0):
+            raise ValueError("histogram layout bins must be a positive prefix sum")
+        if np.any(np.diff(offsets) != n_bins):
+            raise ValueError("histogram layout offsets must match n_bins")
+        if np.any(defaults < 0) or np.any(defaults >= n_bins):
+            raise ValueError("histogram layout default bins are outside bin ranges")
+        if feature_to_local.size == 0 and features.size:
+            raise ValueError("histogram layout reverse lookup is too small")
+        if features.size and np.any(features >= feature_to_local.size):
+            raise ValueError("histogram layout feature index is out of range")
+
+        # Preserve a valid signed dtype (the factory uses int32 below the
+        # int32 feature-count limit) while ensuring unsigned inputs are
+        # normalized to a signed dtype before checking the ``-1`` sentinel.
+        # Unselected entries must remain ``-1``.
+        if np.issubdtype(feature_to_local.dtype, np.signedinteger):
+            reverse = np.array(feature_to_local, copy=True)
+        else:
+            if np.any(feature_to_local > np.iinfo(np.int64).max):
+                raise ValueError(
+                    "histogram layout reverse lookup must fit signed int64"
+                )
+            reverse = np.asarray(feature_to_local, dtype=np.int64)
+        if np.any(reverse < -1) or np.any(reverse >= features.size):
+            raise ValueError("histogram layout reverse lookup contains invalid slots")
+        expected_reverse = np.full(reverse.size, -1, dtype=np.int64)
+        expected_reverse[features] = np.arange(features.size, dtype=np.int64)
+        if not np.array_equal(reverse, expected_reverse):
+            raise ValueError("histogram layout reverse lookup does not match features")
+
+        normalized = (
+            np.asarray(features, dtype=np.int64),
+            np.asarray(n_bins, dtype=np.int64),
+            np.asarray(defaults, dtype=np.int64),
+            np.asarray(offsets, dtype=np.int64),
+            reverse,
+        )
+        for name, values in zip(
+            ("feature_indices", "n_bins", "default_bins", "bin_offsets", "feature_to_local"),
+            normalized,
+        ):
+            values = np.array(values, copy=True)
+            values.setflags(write=False)
+            object.__setattr__(self, name, values)
+
+
+def _make_histogram_layout(
+    mapper: BinMapper,
+    feature_indices: np.ndarray,
+) -> HistogramLayout:
+    """Construct one compact immutable layout for a tree's feature set."""
+    try:
+        n_features = len(mapper.n_bins)
+        raw_features = np.asarray(feature_indices)
+        raw_n_bins = np.asarray(mapper.n_bins)
+        raw_defaults = np.asarray(mapper.default_bins)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("mapper and feature indices must contain valid arrays") from exc
+    if raw_features.ndim != 1 or (
+        raw_features.size and not np.issubdtype(raw_features.dtype, np.integer)
+    ):
+        raise ValueError("feature_indices must be a one-dimensional integer array")
+    features = np.asarray(raw_features, dtype=np.int64)
+    if features.size and (np.any(features < 0) or np.any(features >= n_features)):
+        raise ValueError("feature_indices contains an out-of-range feature")
+    if features.size > 1 and np.any(features[1:] <= features[:-1]):
+        raise ValueError("feature_indices must be sorted and unique")
+
+    try:
+        n_bins = np.asarray(raw_n_bins, dtype=np.int64)
+        defaults = np.asarray(raw_defaults, dtype=np.int64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("mapper bin metadata must be integer-valued") from exc
+    if n_bins.size != n_features or defaults.size != n_features:
+        raise ValueError("mapper metadata has incompatible feature dimensions")
+    selected_n_bins = np.asarray(n_bins[features], dtype=np.int64)
+    selected_defaults = np.asarray(defaults[features], dtype=np.int64)
+    local_offsets = np.zeros(features.size + 1, dtype=np.int64)
+    if selected_n_bins.size:
+        local_offsets[1:] = np.cumsum(selected_n_bins, dtype=np.int64)
+
+    reverse_dtype = np.int32 if n_features < np.iinfo(np.int32).max else np.int64
+    reverse = np.full(n_features, -1, dtype=reverse_dtype)
+    reverse[features] = np.arange(features.size, dtype=reverse_dtype)
+    return HistogramLayout(
+        feature_indices=features,
+        n_bins=selected_n_bins,
+        default_bins=selected_defaults,
+        bin_offsets=local_offsets,
+        feature_to_local=reverse,
+    )
+
+
+def _validate_layout_for_mapper(
+    layout: HistogramLayout,
+    n_features: int,
+    mapper_n_bins: np.ndarray,
+    mapper_defaults: np.ndarray,
+) -> None:
+    """Validate that a local layout is compatible with one mapper."""
+    if not isinstance(layout, HistogramLayout):
+        raise ValueError("histogram layout must be a HistogramLayout")
+    features = layout.feature_indices
+    if layout.feature_to_local.size != n_features:
+        raise ValueError("histogram layout reverse lookup has wrong feature count")
+    if features.size and np.any(features >= n_features):
+        raise ValueError("histogram layout contains an out-of-range feature")
+    if not np.array_equal(layout.n_bins, mapper_n_bins[features]):
+        raise ValueError("histogram layout n_bins do not match mapper")
+    if not np.array_equal(layout.default_bins, mapper_defaults[features]):
+        raise ValueError("histogram layout default bins do not match mapper")
+    if int(layout.bin_offsets[-1]) != sum(int(value) for value in layout.n_bins):
+        raise ValueError("histogram layout final offset is inconsistent")
+
+
 @dataclass(slots=True)
 class Histogram:
     """Flattened per-bin gradient, Hessian, and exact-count statistics."""
@@ -19,6 +185,7 @@ class Histogram:
     gradient_sums: np.ndarray
     hessian_sums: np.ndarray
     counts: np.ndarray
+    layout: HistogramLayout | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,12 +240,12 @@ def build_histogram(
     feature_indices: np.ndarray,
     gradients: np.ndarray,
     hessians: np.ndarray,
+    layout: HistogramLayout | None = None,
 ) -> Histogram:
     """Aggregate one leaf's per-bin gradients, Hessians, and row counts."""
-    # Keep the flattened allocation independent of the selected row/feature
-    # subsets.  In particular, an empty subset still returns one zero-filled
-    # segment for every bin in the mapper, which lets callers reuse the same
-    # histogram layout throughout tree growth.
+    # By default preserve the public/global mapper layout.  A tree supplies one
+    # immutable local layout so each leaf's arrays contain only its sampled
+    # features while all direct helper callers retain the original contract.
     try:
         n_samples, n_features = (int(data.shape[0]), int(data.shape[1]))
         mapper = data.mapper
@@ -163,7 +330,13 @@ def build_histogram(
     expected_total = sum(int(value) for value in raw_n_bins)
     if int(raw_offsets[-1]) != expected_total:
         raise ValueError("data mapper final bin offset is inconsistent")
-    total_bins = expected_total
+    if layout is not None:
+        _validate_layout_for_mapper(layout, n_features, raw_n_bins, raw_defaults)
+        local_features = layout.feature_indices
+        total_bins = int(layout.bin_offsets[-1])
+    else:
+        local_features = None
+        total_bins = expected_total
 
     # Normalize index vectors without silently truncating fractional values.
     # Empty Python lists are accepted as a convenience, while non-empty index
@@ -193,6 +366,12 @@ def build_histogram(
     features = _normalize_indices(feature_indices, n_features, "feature_indices")
     if features.size > 1 and np.unique(features).size != features.size:
         raise ValueError("feature_indices must not contain duplicate features")
+    if layout is not None:
+        sorted_features = np.sort(features)
+        if not np.array_equal(sorted_features, local_features):
+            raise ValueError("feature_indices do not match histogram layout")
+        # Local segments are always addressed in immutable sorted layout order.
+        features = local_features
 
     try:
         gradient_values = np.asarray(gradients, dtype=np.float64)
@@ -217,6 +396,7 @@ def build_histogram(
             gradient_sums=gradient_sums,
             hessian_sums=hessian_sums,
             counts=counts,
+            layout=layout,
         )
 
     # Unique rows plus multiplicities lets this routine remain well-defined
@@ -228,10 +408,16 @@ def build_histogram(
     leaf_hessian = float(np.sum(hessian_values[rows], dtype=np.float64))
     csc = data.csc
 
-    for feature in features:
+    for local_slot, feature in enumerate(features):
         feature_index = int(feature)
-        start = int(raw_offsets[feature_index])
-        end = int(raw_offsets[feature_index + 1])
+        if layout is None:
+            start = int(raw_offsets[feature_index])
+            end = int(raw_offsets[feature_index + 1])
+            default_bin = int(raw_defaults[feature_index])
+        else:
+            start = int(layout.bin_offsets[local_slot])
+            end = int(layout.bin_offsets[local_slot + 1])
+            default_bin = int(layout.default_bins[local_slot])
         n_feature_bins = end - start
         if n_feature_bins <= 0:
             # A malformed mapper should not make indexed writes wrap around.
@@ -285,7 +471,6 @@ def build_histogram(
         represented_gradient = float(np.sum(gradient_sums[segment], dtype=np.float64))
         represented_hessian = float(np.sum(hessian_sums[segment], dtype=np.float64))
         represented_count = int(np.sum(counts[segment], dtype=np.int64))
-        default_bin = int(raw_defaults[feature_index])
         if default_bin < 0 or default_bin >= n_feature_bins:
             raise ValueError("data mapper default bin is outside feature bin range")
         default_offset = start + default_bin
@@ -297,6 +482,7 @@ def build_histogram(
         gradient_sums=gradient_sums,
         hessian_sums=hessian_sums,
         counts=counts,
+        layout=layout,
     )
 
 
@@ -308,6 +494,7 @@ def find_best_split(
     parent_count: int,
     mapper: BinMapper,
     config: LiteLightGBMConfig,
+    layout: HistogramLayout | None = None,
 ) -> SplitInfo | None:
     """Return the highest-gain valid split, or ``None`` for a terminal leaf."""
     # Validate the flattened histogram and mapper metadata before indexing any
@@ -417,11 +604,22 @@ def find_best_split(
         raise ValueError("mapper bin offsets must be a non-negative prefix sum")
     if np.any(n_bins <= 0) or np.any(np.diff(offsets) != n_bins):
         raise ValueError("mapper bin offsets must match positive n_bins")
-    total_bins = int(offsets[-1])
-    if total_bins != gradients.size:
-        raise ValueError("histogram arrays do not match mapper bin layout")
     if np.any(defaults < 0) or np.any(defaults >= n_bins):
         raise ValueError("mapper default bins are outside feature bin ranges")
+
+    histogram_layout = histogram.layout
+    if layout is not None:
+        if histogram_layout is not None and layout is not histogram_layout:
+            raise ValueError("histogram and split layout objects do not match")
+        histogram_layout = layout
+    layout = histogram_layout
+    if layout is not None:
+        _validate_layout_for_mapper(layout, n_features, n_bins, defaults)
+        total_bins = int(layout.bin_offsets[-1])
+    else:
+        total_bins = int(offsets[-1])
+    if total_bins != gradients.size:
+        raise ValueError("histogram arrays do not match mapper bin layout")
 
     # Normalize selected feature indices without allowing a fractional value to
     # be truncated into a different feature.  Empty selections simply have no
@@ -442,6 +640,11 @@ def find_best_split(
             raise ValueError("feature_indices must not contain duplicate features")
     else:
         features = np.empty(0, dtype=np.int64)
+    if layout is not None:
+        sorted_features = np.sort(features)
+        if not np.array_equal(sorted_features, layout.feature_indices):
+            raise ValueError("feature_indices do not match histogram layout")
+        features = layout.feature_indices
 
     # Configuration values are expected to be validated by ``fit`` as well,
     # but direct split-search calls should not silently accept negative
@@ -516,10 +719,23 @@ def find_best_split(
     best_feature = n_features
     best_threshold = int(np.max(n_bins)) if n_bins.size else 1
 
-    for feature_value in features:
-        feature = int(feature_value)
-        start = int(offsets[feature])
-        end = int(offsets[feature + 1])
+    if layout is None:
+        feature_segments = (
+            (int(feature), int(offsets[int(feature)]), int(offsets[int(feature) + 1]), int(defaults[int(feature)]))
+            for feature in features
+        )
+    else:
+        feature_segments = (
+            (
+                int(feature),
+                int(layout.bin_offsets[local_slot]),
+                int(layout.bin_offsets[local_slot + 1]),
+                int(layout.default_bins[local_slot]),
+            )
+            for local_slot, feature in enumerate(layout.feature_indices)
+        )
+
+    for feature, start, end, default_bin in feature_segments:
         feature_bin_count = end - start
         if feature_bin_count <= 1:
             continue
@@ -590,7 +806,7 @@ def find_best_split(
                 gain=gain,
                 feature=feature,
                 threshold_bin=threshold,
-                default_left=bool(int(defaults[feature]) <= threshold),
+                default_left=bool(default_bin <= threshold),
                 left_count=left_count,
                 right_count=right_count,
                 left_gradient=left_gradient,
@@ -912,6 +1128,9 @@ def fit_tree(
     # order.  Sorting here also makes direct fit_tree calls obey that invariant
     # without changing which features are eligible for split search.
     features = np.sort(features.copy())
+    # Build one immutable compact histogram layout for this tree.  All leaf
+    # histograms below share this object; no per-leaf reverse lookup is built.
+    layout = _make_histogram_layout(data.mapper, features)
 
     try:
         gradient_values = np.asarray(gradients, dtype=np.float64)
@@ -1011,6 +1230,7 @@ def fit_tree(
         features,
         gradient_values,
         hessian_values,
+        layout=layout,
     )
     if max_depth <= 0 or 0 < max_depth:
         root_split = find_best_split(
@@ -1105,6 +1325,7 @@ def fit_tree(
             features,
             gradient_values,
             hessian_values,
+            layout=layout,
         )
         left_split = find_best_split(
             left_histogram,
@@ -1133,6 +1354,7 @@ def fit_tree(
             features,
             gradient_values,
             hessian_values,
+            layout=layout,
         )
         right_split = find_best_split(
             right_histogram,

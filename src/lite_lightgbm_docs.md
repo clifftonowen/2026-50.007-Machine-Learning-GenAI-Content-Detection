@@ -37,6 +37,19 @@ not estimator behavior or public usage: the implementation definitions now
 reside in the `lite_lightgbm_dep` implementation package described below, while
 `src.lite_lightgbm` remains the stable façade.
 
+Optimization 3 is complete. After binning, fitting records count-splittable
+original feature IDs in `active_features_`. Each tree then allocates histograms
+only for its sampled active features, while stored split IDs and feature
+importances continue to use the original input-column numbering.
+
+Optimizations 4-8 remain implementation plans and do not change current usage:
+validated internal hot paths, vectorized flattened histogram aggregation,
+histogram subtraction, bounded histogram caching, and vectorized split
+evaluation. Their detailed contracts are in the corresponding
+`lite_lightgbm_OPT4.md` through `lite_lightgbm_OPT8.md` files. Project-scale
+training should wait until this performance-critical sequence is implemented
+and benchmarked.
+
 ## Import and module layout
 
 Continue importing the estimator and documented development helpers from the public
@@ -144,6 +157,7 @@ These attributes exist after a successful `fit`:
 | `init_score_` | Weighted positive-rate log-odds. |
 | `learning_rate_` | Fit-time learning rate used by prediction. |
 | `feature_importances_` | Split counts per original feature. |
+| `active_features_` | Sorted `int64` original feature IDs that can satisfy `min_child_samples` on the full training set. |
 
 Capturing `learning_rate_` ensures that calling `set_params` after fitting does not
 silently change the predictions of an already-fitted model.
@@ -257,6 +271,12 @@ Contains three flattened arrays using `BinMapper.bin_offsets`:
 
 Each selected feature has its own histogram segment, and every row contributes once to
 that segment, including through the feature's implicit default bin.
+
+During tree fitting, `HistogramLayout` supplies a compact tree-local equivalent of
+this layout. It contains the sorted original feature IDs selected for the tree, their
+bin counts and default bins, local prefix offsets, and an original-feature-to-local-slot
+lookup. The layout is immutable and shared by every histogram in that tree. Empty
+layouts have the single offset `[0]` and produce root-only trees.
 
 ### `SplitInfo`
 

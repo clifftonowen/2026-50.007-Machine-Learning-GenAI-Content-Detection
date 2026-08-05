@@ -44,6 +44,10 @@ The complete training flow is:
    floating-point value. Bin-boundary candidate scanning is NumPy-vectorized, while the
    documented deterministic selection, feasibility checks, and lower-boundary tie-break
    remain unchanged. Binning is performed once and reused by every tree.
+   A count-only scan then removes only original features that cannot satisfy
+   `min_child_samples` at any full-training bin boundary. Each tree uses a compact local
+   histogram layout for its sampled surviving features, but retains original feature IDs
+   in nodes and importances.
 2. **Make an initial prediction.** The initial raw score is the log-odds of the weighted
    positive-class frequency. Before any trees are fitted, every row receives this score.
 3. **Measure the current errors.** Convert each row's raw score to a probability and
@@ -469,19 +473,29 @@ per-feature implementation is only a correctness oracle; do not start project-sc
 with it. Add and test these optimizations in order:
 
 1. **OPT2 — compact bin dtypes** (complete: encoded sparse-bin values use the smallest safe unsigned dtype);
-2. feature pre-filtering;
-3. vectorized flattened histogram aggregation;
-4. histogram subtraction, checked against direct construction;
-5. bounded histogram caching if profiling still justifies it.
+2. **OPT3 — feature pre-filtering and local histogram layouts** (complete);
+3. **OPT4 — validated internal hot paths**;
+4. **OPT5 — vectorized flattened histogram aggregation**;
+5. **OPT6 — histogram subtraction**, checked against direct construction;
+6. **OPT7 — bounded histogram caching**;
+7. **OPT8 — vectorized split evaluation** within each feature.
+
+Each planned optimization has a standalone implementation contract in the matching
+`lite_lightgbm_OPT<N>.md` file. OPT8 retains the bounded loop over selected features but
+replaces the scalar candidate-threshold loop with array masks and vector score
+calculation. It must preserve the strict gain rule and the existing feature/threshold
+tie-break.
 
 The extraction-only module refactor in `lite_lightgbm_refac.md` is complete.
 It preserved the `src.lite_lightgbm` façade and exact behavior; OPT3 behavior
 remains outside that extraction.
 
-The first four are prerequisites for the 5,000-feature benchmark. Feature bundling
-remains optional and should be added only if the 40,385-feature profile shows that its
-complexity is necessary. GOSS is not part of this sequence because the project's current
-reference estimator uses ordinary `gbdt` boosting.
+Complete the performance-critical sequence through OPT8 before project-scale fitting.
+OPT7 bounds the live-histogram memory introduced by OPT6; its cache budget must be
+selected from measurements rather than assumed. Feature bundling remains optional and
+should be added only if the 40,385-feature profile shows that its complexity is
+necessary. GOSS is not part of this sequence because the project's current reference
+estimator uses ordinary `gbdt` boosting.
 
 ### 7. Project-scale correctness
 
