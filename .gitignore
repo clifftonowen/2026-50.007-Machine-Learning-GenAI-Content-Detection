@@ -26,6 +26,7 @@ data/processed/*
 models/*
 !models/.gitkeep
 
+submissions/*
 !submissions/.gitkeep
 
 reports/figures/*
@@ -36,6 +37,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv*/
 venv/
 .ipynb_checkpoints/
 
