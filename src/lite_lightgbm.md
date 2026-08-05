@@ -2,9 +2,15 @@
 
 ## Status
 
-`src/lite_lightgbm.py` is a complete implementation of the documented
+`src/lite_lightgbm.py` is the stable public module for the complete documented
 LightGBM-like model. Its model routines implement the stated scope, validation
 rules, and deterministic training flow.
+
+The completed extraction-only refactor specified in
+[`lite_lightgbm_refac.md`](lite_lightgbm_refac.md) keeps the estimator in the
+public module and places shared core, binning, and tree internals in the
+`lite_lightgbm_dep` implementation package. It preserves imports, results, validation, serialization
+behavior, and runtime semantics.
 
 The goal is a deterministic, sparse, histogram-based gradient-boosted tree classifier
 that behaves similarly to the subset of LightGBM used by this project. The goal is not
@@ -128,6 +134,33 @@ The module must not import from or inherit from scikit-learn. It implements `get
 for the repository's external CV utilities, not a scikit-learn dependency or part of
 training. The estimator must pass a `cross_val_score` smoke test as soon as minimal `fit`
 and `predict` implementations exist.
+
+### Module organization and import contract
+
+The only supported user-facing import location is `src.lite_lightgbm`:
+
+```python
+from src.lite_lightgbm import LiteLightGBM
+```
+
+The internal layout is:
+
+| File | Responsibility |
+|---|---|
+| `lite_lightgbm.py` | Public façade, estimator validation, boosting loop, and prediction API |
+| `lite_lightgbm_dep/core.py` | Shared configuration, type aliases, constants, and numerical helpers |
+| `lite_lightgbm_dep/binning.py` | Bin containers, mapper fitting, and dense/sparse bin transformation |
+| `lite_lightgbm_dep/tree.py` | Histograms, split search, tree growth, partitioning, and tree traversal |
+
+All names documented in `lite_lightgbm_docs.md` remain importable from
+`src.lite_lightgbm` after extraction. The private modules must not be imported directly
+by project code or notebooks. Their names and contents are implementation details that
+later optimizations may change.
+
+Dependencies must be acyclic: core has no sibling dependency, binning depends on core,
+tree depends on core and binning, and the public façade depends on all three. Private
+modules must never import the façade. See `lite_lightgbm_refac.md` for the exact symbol
+map, migration stages, persistence requirements, and verification matrix.
 
 The project's predicted-share and per-group thresholding remain downstream operations.
 They do not belong inside this estimator.
@@ -440,6 +473,10 @@ with it. Add and test these optimizations in order:
 3. vectorized flattened histogram aggregation;
 4. histogram subtraction, checked against direct construction;
 5. bounded histogram caching if profiling still justifies it.
+
+The extraction-only module refactor in `lite_lightgbm_refac.md` is complete.
+It preserved the `src.lite_lightgbm` façade and exact behavior; OPT3 behavior
+remains outside that extraction.
 
 The first four are prerequisites for the 5,000-feature benchmark. Feature bundling
 remains optional and should be added only if the 40,385-feature profile shows that its

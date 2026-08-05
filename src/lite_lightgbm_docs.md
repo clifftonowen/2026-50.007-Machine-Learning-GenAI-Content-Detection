@@ -2,8 +2,9 @@
 
 ## Overview
 
-`src/lite_lightgbm.py` defines a small, auditable, LightGBM-like classifier for this
-project's binary sparse-text problem. It retains the central ideas behind LightGBM:
+`src.lite_lightgbm` is the stable public module for a small, auditable, LightGBM-like
+classifier for this project's binary sparse-text problem. It retains the central ideas
+behind LightGBM:
 
 - second-order gradient boosting for binary log loss;
 - frequency-weighted numeric feature bins;
@@ -30,6 +31,37 @@ and prediction paths are implemented against the documented invariants.
 Encoded sparse bin values use the smallest safe unsigned dtype (`uint8`, `uint16`,
 `uint32`, or `uint64`); mapper metadata remain `int64`, while SciPy structural
 indices are unchanged and may be signed `int32` or `int64`.
+
+The extraction-only internal refactor is complete. It changed file ownership,
+not estimator behavior or public usage: the implementation definitions now
+reside in the `lite_lightgbm_dep` implementation package described below, while
+`src.lite_lightgbm` remains the stable façade.
+
+## Import and module layout
+
+Continue importing the estimator and documented development helpers from the public
+façade:
+
+```python
+from src.lite_lightgbm import LiteLightGBM, fit_bin_mapper, fit_tree
+```
+
+The implementation is organized into these files:
+
+| File | Role |
+|---|---|
+| `lite_lightgbm.py` | Stable façade and `LiteLightGBM` estimator |
+| `lite_lightgbm_dep/core.py` | Configuration, shared types, constants, and numerical helpers |
+| `lite_lightgbm_dep/binning.py` | Bin mapper and encoded sparse transformation |
+| `lite_lightgbm_dep/tree.py` | Histograms, splits, tree construction, and traversal |
+
+The three dependency modules are implementation details. Application code and notebooks
+must not import them directly. All classes and functions documented below remain re-exported
+from `src.lite_lightgbm`, so model construction, fitting, prediction, and development
+helper usage do not change.
+
+The completed extraction procedure and compatibility gates are in
+[`lite_lightgbm_refac.md`](lite_lightgbm_refac.md).
 
 ## Supported scope
 
@@ -347,9 +379,16 @@ pickle or joblib persistence can be used externally. A persisted model must repr
 raw scores, probabilities, and labels exactly after a round trip. It is not compatible
 with LightGBM model files.
 
+The internal refactor retains aliases for moved classes in `src.lite_lightgbm` so older
+project pickles can resolve their original names. New pickles may record implementation
+module paths for nested dataclasses, so the façade and all files in `lite_lightgbm_dep/`
+must be distributed together. User code should never compensate by importing dependency
+modules directly.
+
 ## Further reading
 
 - [`lite_lightgbm.md`](lite_lightgbm.md): implementation contract and acceptance gates.
+- [`lite_lightgbm_refac.md`](lite_lightgbm_refac.md): extraction-only module refactor plan.
 - [LightGBM features](https://lightgbm.readthedocs.io/en/stable/Features.html)
 - [LightGBM parameters](https://lightgbm.readthedocs.io/en/stable/Parameters.html)
 - [LightGBM paper](https://papers.nips.cc/paper/6907-lightgbm-a-highly-efficient-gradient-boosting-decision-tree.pdf)
