@@ -35,7 +35,9 @@ The complete training flow is:
 
 1. **Bin the feature values.** Continuous values are converted into a limited number of
    ordered bins. The tree searches boundaries between bins rather than every distinct
-   floating-point value. Binning is performed once and reused by every tree.
+   floating-point value. Bin-boundary candidate scanning is NumPy-vectorized, while the
+   documented deterministic selection, feasibility checks, and lower-boundary tie-break
+   remain unchanged. Binning is performed once and reused by every tree.
 2. **Make an initial prediction.** The initial raw score is the log-odds of the weighted
    positive-class frequency. Before any trees are fitted, every row receives this score.
 3. **Measure the current errors.** Convert each row's raw score to a probability and
@@ -260,6 +262,11 @@ For each feature:
    value `x` with `np.searchsorted(cut_points, x, side="left")`;
 6. map numeric zero through that same expression and record its result as the default
    bin.
+
+The candidate-boundary scan in this procedure is NumPy-vectorized; it preserves the
+same exact frequency counts, feasible ranges, desired-rank distances, and stable
+lower-boundary tie-break as the reference algorithm. Dense, CSR, CSC, and equivalent
+non-canonical sparse inputs therefore retain identical deterministic mappers.
 
 Constant features consequently have one bin and no cut points. Unseen prediction values
 below, between, or above training values are handled by the same `searchsorted` rule.

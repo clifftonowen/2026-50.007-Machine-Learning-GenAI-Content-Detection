@@ -271,8 +271,10 @@ finite logits may therefore have a zero Hessian.
 
 Learns deterministic, frequency-weighted cut points without densifying sparse input.
 Occurrence counts determine quantiles; targets, class weights, and sample weights never
-affect binning. Sparse matrices are canonicalized so equivalent dense, CSR, and CSC
-representations learn the same mapper.
+affect binning. Bin-boundary candidate scanning is NumPy-vectorized, but the exact
+feasibility rules, desired-rank distances, stable lower-boundary tie-break, and sparse
+zero semantics are preserved. Sparse matrices are canonicalized so equivalent dense,
+CSR, and CSC representations learn the same deterministic mapper.
 
 ### `transform_bins(X, mapper)`
 

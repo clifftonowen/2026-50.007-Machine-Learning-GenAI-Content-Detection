@@ -1,5 +1,50 @@
 # LiteLightGBM optimization 1: vectorize bin-boundary selection
 
+## Status: completed
+
+OPT1 is implemented in `src/lite_lightgbm.py`. `fit_bin_mapper` now delegates
+per-feature boundary selection to `_find_bin_boundaries`; its inner candidate
+scan uses NumPy cumulative counts, slices, masks, and stable `argmin`, while
+the sequential outer boundary loop remains intact. Independent verification
+confirmed exact mapper parity on deterministic and randomized reference cases,
+including dense, CSR, CSC, and non-canonical sparse inputs, with deterministic
+tie-breaking and no sparse densification.
+
+Completion evidence (2026-08-05): on the supplied
+`data/raw/train_features.csv` representation (20,000 rows x 5,000 features),
+loaded as the project CSR matrix (`float32`, 1,356,986 stored values,
+density 0.01356986), the git-HEAD mapper and current mapper were run in one
+process with one full-input warm-up each and the same
+`LiteLightGBMConfig(max_bin=255, min_data_in_bin=3)`. The timed runs were
+64.1251 s (git HEAD) versus 10.7056 s (current), a 5.9899x speedup. Peak
+process RSS sampled during the runs was 151,875,584 B (git HEAD; +38,932,480 B
+over its timed baseline) and 155,062,272 B (current; +36,073,472 B). Both
+mappers had exactly 376,209 total bins (per-feature range 5..255), and
+`cut_points`, `default_bins`, `n_bins`, and `bin_offsets` were all
+`np.array_equal`. Reproduction used a PowerShell here-string piped to
+`uv run python -`, loading with `src.data.load_train_features(sparse=True)`;
+the git-HEAD source was read in-memory with `git show
+HEAD:src/lite_lightgbm.py` (no workspace file replacement), timed with
+`time.perf_counter`, and RSS sampled via `psutil` every 2 ms.
+
+Deliberately deferred: the secondary per-feature streaming suggested under
+"Implementation design" was not implemented. `fit_bin_mapper` still builds the
+complete `value_counts` list before selecting boundaries, so every feature's
+distinct values and counts stay alive simultaneously. On the supplied
+5,000-feature representation that list holds 1,357,223 distinct values in total
+(mean 271.4, maximum 9,354 per feature), which is roughly 21.7 MB of array
+payload plus about 1.1 MB of ndarray object overhead; streaming would hold
+about 0.15 MB at a time. That accounts for most of the +36,073,472 B RSS delta
+recorded above. It was left out because the mapper runs once per fit, the
+saving is roughly 15% of process RSS, and no memory limit has been reached,
+whereas restructuring would touch a routine whose exact parity is now verified
+without improving mapper time at all. Revisit it only if profiling the
+40,385-feature representation shows mapper peak memory to be a real constraint;
+the payload scales roughly with total stored values. The clean form is a
+generator yielding `(values, counts)` per feature that the existing selection
+loop consumes, which keeps peak memory low without duplicating the dense and
+sparse counting branches. Compact bin dtypes remain optimization 2.
+
 ## Objective
 
 Reduce the one-time cost of `fit_bin_mapper` without changing any learned cut
@@ -143,4 +188,3 @@ process after one warm-up, using the same input and configuration. Report:
 - The 5,000-feature mapper benchmark is materially faster; target at least a
   2x reduction in mapper time before proceeding.
 - No estimator API or fitted prediction changes as a result of this step.
-

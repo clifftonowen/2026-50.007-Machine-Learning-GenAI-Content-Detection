@@ -162,6 +162,105 @@ def binary_gradients_hessians(
     return gradients, hessians
 
 
+def _find_bin_boundaries(
+    values: np.ndarray,
+    counts: np.ndarray,
+    n_samples: int,
+    max_bin: int,
+    min_data_in_bin: int,
+) -> tuple[np.ndarray, int]:
+    """Select deterministic cut points for one sorted feature.
+
+    ``values`` and ``counts`` are produced by :func:`fit_bin_mapper`, so they
+    are already sorted distinct values and matching positive occurrence counts.
+    The candidate-boundary scan is expressed with NumPy indexing while the
+    outer boundary loop remains sequential because each chosen boundary limits
+    the feasible range for the next one.
+    """
+    n_distinct = int(values.size)
+    # The upper bound is deliberately frequency based: each row, including
+    # implicit sparse zeros, contributes one occurrence to n_samples.
+    max_feasible_bins = min(
+        max_bin,
+        n_distinct,
+        max(1, n_samples // min_data_in_bin),
+    )
+    cumulative = np.cumsum(counts, dtype=np.int64)
+    all_boundary_indices = np.arange(n_distinct - 1, dtype=np.int64)
+
+    selected_boundaries: list[int] | None = None
+    selected_bin_count = 1
+    # Start at the largest allowed B.  If a complete set of B-1 boundaries
+    # cannot be selected under the child-size constraints, retry with one
+    # fewer bin.  A single-bin feature is always valid.
+    for candidate_bins in range(max_feasible_bins, 0, -1):
+        if candidate_bins == 1:
+            selected_boundaries = []
+            selected_bin_count = 1
+            break
+
+        boundaries: list[int] = []
+        previous_boundary = -1
+        previous_count = 0
+        success = True
+        for k in range(1, candidate_bins):
+            desired_rank = (float(k) * float(n_samples)) / float(candidate_bins)
+            # Leave enough distinct values for the unfinished bins.  The
+            # final permissible boundary is therefore n_distinct-2, while
+            # earlier boundaries must leave progressively more values.
+            last_boundary = n_distinct - (candidate_bins - k) - 1
+            if last_boundary < previous_boundary + 1:
+                success = False
+                break
+
+            lower = previous_boundary + 1
+            candidates = all_boundary_indices[lower : last_boundary + 1]
+            left_counts = cumulative[candidates] - previous_count
+            remaining_count = n_samples - cumulative[candidates]
+            remaining_bins = candidate_bins - k
+            feasible = (
+                (left_counts >= min_data_in_bin)
+                & (remaining_count >= remaining_bins * min_data_in_bin)
+            )
+            feasible_candidates = candidates[feasible]
+            if feasible_candidates.size == 0:
+                success = False
+                break
+
+            # np.argmin is stable for equal values; candidates are in
+            # ascending value/count order, so ties go to the lower-valued
+            # boundary as required by the contract.
+            distances = np.abs(
+                np.asarray(cumulative[feasible_candidates], dtype=np.float64)
+                - desired_rank
+            )
+            chosen = int(feasible_candidates[int(np.argmin(distances))])
+            boundaries.append(chosen)
+            previous_boundary = chosen
+            previous_count = int(cumulative[chosen])
+
+        if success and len(boundaries) == candidate_bins - 1:
+            selected_boundaries = boundaries
+            selected_bin_count = candidate_bins
+            break
+
+    # max_feasible_bins is at least one for a non-empty feature, and B=1
+    # above always succeeds.  Keep this guard for defensive clarity if the
+    # implementation is later changed to permit empty features.
+    if selected_boundaries is None:  # pragma: no cover
+        selected_boundaries = []
+        selected_bin_count = 1
+
+    if selected_boundaries:
+        cuts = np.asarray(
+            [values[index] for index in selected_boundaries],
+            dtype=np.float64,
+        )
+    else:
+        cuts = np.empty(0, dtype=np.float64)
+    return cuts, selected_bin_count
+
+
 def fit_bin_mapper(X: Matrix, config: LiteLightGBMConfig) -> BinMapper:
     """Learn deterministic numeric bins without densifying sparse input."""
     # Keep this routine independent of the estimator's validation path.  The
@@ -261,91 +360,13 @@ def fit_bin_mapper(X: Matrix, config: LiteLightGBMConfig) -> BinMapper:
     n_bins = np.empty(n_features, dtype=np.int64)
 
     for feature, (values, counts) in enumerate(value_counts):
-        n_distinct = int(values.size)
-        # The upper bound is deliberately frequency based: each row, including
-        # implicit sparse zeros, contributes one occurrence to n_samples.
-        max_feasible_bins = min(
+        cuts, selected_bin_count = _find_bin_boundaries(
+            values,
+            counts,
+            n_samples,
             max_bin,
-            n_distinct,
-            max(1, n_samples // min_data_in_bin),
+            min_data_in_bin,
         )
-        cumulative = np.cumsum(counts, dtype=np.int64)
-
-        selected_boundaries: list[int] | None = None
-        selected_bin_count = 1
-        # Start at the largest allowed B.  If a complete set of B-1 boundaries
-        # cannot be selected under the child-size constraints, retry with one
-        # fewer bin.  A single-bin feature is always valid.
-        for candidate_bins in range(max_feasible_bins, 0, -1):
-            if candidate_bins == 1:
-                selected_boundaries = []
-                selected_bin_count = 1
-                break
-
-            boundaries: list[int] = []
-            previous_boundary = -1
-            previous_count = 0
-            success = True
-            for k in range(1, candidate_bins):
-                desired_rank = (float(k) * float(n_samples)) / float(
-                    candidate_bins
-                )
-                # Leave enough distinct values for the unfinished bins.  The
-                # final permissible boundary is therefore n_distinct-2, while
-                # earlier boundaries must leave progressively more values.
-                last_boundary = n_distinct - (candidate_bins - k) - 1
-                if last_boundary < previous_boundary + 1:
-                    success = False
-                    break
-
-                candidates: list[int] = []
-                for boundary in range(previous_boundary + 1, last_boundary + 1):
-                    left_count = int(cumulative[boundary]) - previous_count
-                    remaining_count = n_samples - int(cumulative[boundary])
-                    if left_count < min_data_in_bin:
-                        continue
-                    if remaining_count < (candidate_bins - k) * min_data_in_bin:
-                        continue
-                    candidates.append(boundary)
-
-                if not candidates:
-                    success = False
-                    break
-
-                # np.argmin is stable for equal values; candidates are in
-                # ascending value/count order, so ties go to the lower-valued
-                # boundary as required by the contract.
-                distances = np.asarray(
-                    [
-                        abs(float(cumulative[index]) - desired_rank)
-                        for index in candidates
-                    ],
-                    dtype=np.float64,
-                )
-                chosen = candidates[int(np.argmin(distances))]
-                boundaries.append(chosen)
-                previous_boundary = chosen
-                previous_count = int(cumulative[chosen])
-
-            if success and len(boundaries) == candidate_bins - 1:
-                selected_boundaries = boundaries
-                selected_bin_count = candidate_bins
-                break
-
-        # max_feasible_bins is at least one for a non-empty feature, and B=1
-        # above always succeeds.  Keep this guard for defensive clarity if the
-        # implementation is later changed to permit empty features.
-        if selected_boundaries is None:  # pragma: no cover
-            selected_boundaries = []
-            selected_bin_count = 1
-
-        if selected_boundaries:
-            cuts = np.asarray(
-                [values[index] for index in selected_boundaries],
-                dtype=np.float64,
-            )
-        else:
-            cuts = np.empty(0, dtype=np.float64)
         cut_points.append(cuts)
         n_bins[feature] = np.int64(selected_bin_count)
         default_bins[feature] = np.int64(
