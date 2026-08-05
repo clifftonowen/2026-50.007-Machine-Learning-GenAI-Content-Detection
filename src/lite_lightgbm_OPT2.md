@@ -1,9 +1,16 @@
 # LiteLightGBM optimization 2: compact bin storage
 
+## Completion status
+
+Completed. `transform_bins` now stores encoded bin values in the smallest safe
+unsigned dtype, while mapper metadata and sparse structural indices remain
+unchanged. Sparse structural indices may be signed `int32` or `int64`, depending
+on SciPy and matrix shape.
+
 ## Objective
 
 Store encoded bins in the smallest safe unsigned integer dtype. The current
-`transform_bins` implementation stores sparse bin data as `int64`, even though
+`transform_bins` implementation previously stored sparse bin data as `int64`, even though
 the default configuration has at most 255 bins per feature. Compact storage
 reduces the memory footprint and memory bandwidth of the binned CSR/CSC views.
 
@@ -26,18 +33,22 @@ encoded maximum.
 
 `BinMapper.default_bins`, `BinMapper.n_bins`, and `BinMapper.bin_offsets` remain
 signed `int64`. Sparse matrix indices and indptr arrays are structural indices,
-not bin values, and are outside this optimization.
+not bin values, are unchanged by this optimization, and may be signed `int32` or
+`int64` depending on SciPy and matrix shape.
 
 ## Dtype selection
 
 Add one private helper such as:
 
 ```python
-def _encoded_bin_dtype(mapper: BinMapper) -> np.dtype:
+def _encoded_bin_dtype(n_bins: np.ndarray) -> np.dtype:
+    """Return the smallest unsigned dtype for validated bin counts."""
     ...
 ```
 
-Let `largest_encoded_bin = max(mapper.n_bins)`. Select:
+The caller validates and normalizes `mapper.n_bins` to a signed `int64` array
+before calling this helper. It is a pure dtype selector: let
+`largest_encoded_bin = max(n_bins)` and select:
 
 | Largest encoded bin | Dtype |
 |---:|---|
@@ -60,13 +71,14 @@ For sparse input:
 - apply the comparison with the `int64` default bin before narrowing;
 - cast only the kept `bin_id + 1` values to the selected unsigned dtype;
 - create the CSC matrix with that dtype;
-- derive the CSR matrix from the CSC matrix and verify that its data dtype is
-  preserved.
+- derive the CSR matrix from the CSC matrix; and
+- after all `sum_duplicates`, `eliminate_zeros`, `sort_indices`, and `tocsr`
+  calls, verify that both `csc.data.dtype` and `csr.data.dtype` are preserved.
 
-For dense input, the temporary bin matrix may also use the selected unsigned
-dtype, provided comparisons against defaults remain correct. Avoid arithmetic
-such as adding one to `uint8(255)`: calculate or validate the encoded value in a
-wider integer type, then cast after the bound check.
+For dense input, the temporary bin matrix uses the selected unsigned dtype. When
+constructing one-based stored values, first widen the selected entries to signed
+`int64`, add one, check the encoded bound, and only then cast to the selected
+unsigned dtype. Never add one directly in an unsigned dtype such as `uint8`.
 
 All consumers must treat `csr.data` and `csc.data` as encoded unsigned values.
 When subtracting one, first widen to a signed type:
@@ -94,8 +106,8 @@ Do not depend on the index dtype and do not recreate an entire sparse matrix
 solely to force its indices smaller.
 
 Calling `sum_duplicates`, `eliminate_zeros`, `sort_indices`, and `tocsr` must not
-change the unsigned data dtype. Check this explicitly for the supported SciPy
-version.
+change the unsigned data dtype. Check both sparse views only after all of these
+canonicalization calls have completed.
 
 ## Verification
 
@@ -139,4 +151,3 @@ and pointers are unchanged and both CSR and CSC views are retained.
 - Seeded model structure and predictions remain unchanged.
 - Sparse inputs remain sparse, and the module still depends only on NumPy,
   SciPy, and the standard library.
-

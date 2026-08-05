@@ -26,7 +26,10 @@ reference.
 
 The module is complete for its documented scope. Its data containers, estimator
 constructor, parameter helpers, metadata hook, numerical routines, binning, training,
-and prediction paths are implemented and tested against the documented invariants.
+and prediction paths are implemented against the documented invariants.
+Encoded sparse bin values use the smallest safe unsigned dtype (`uint8`, `uint16`,
+`uint32`, or `uint64`); mapper metadata remain `int64`, while SciPy structural
+indices are unchanged and may be signed `int32` or `int64`.
 
 ## Supported scope
 
@@ -204,6 +207,14 @@ Only values whose bin differs from the feature's default bin are stored. A store
 encoded as `bin_id + 1`, leaving SciPy's implicit zero unambiguous. The `shape` property
 returns `(n_samples, n_features)`.
 
+The encoded values use the smallest safe unsigned dtype for the fitted feature-bin
+layout. Consumers widen these values to signed `int64` before decoding them, so an
+invalid stored zero is rejected rather than underflowing.
+
+The private `_encoded_bin_dtype(n_bins)` helper receives an already validated and
+normalized signed `int64` `n_bins` array and is a pure dtype selector. Validation and
+normalization remain in `transform_bins`.
+
 ### `Histogram`
 
 Contains three flattened arrays using `BinMapper.bin_offsets`:
@@ -279,7 +290,10 @@ CSR, and CSC representations learn the same deterministic mapper.
 ### `transform_bins(X, mapper)`
 
 Maps a matrix through a fitted `BinMapper` and returns encoded CSR and CSC views. Input
-must have the same feature count used to fit the mapper.
+must have the same feature count used to fit the mapper. Dense input uses the selected
+encoded dtype for its temporary bin matrix; one-based values are widened to signed
+`int64` before adding one and checking bounds, then narrowed to that dtype. Sparse CSC
+and CSR canonicalization runs to completion before both data dtypes are verified.
 
 ### `build_histogram(data, row_indices, feature_indices, gradients, hessians)`
 

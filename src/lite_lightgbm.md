@@ -235,7 +235,28 @@ keeps both CSR and CSC views of the same logical quantized matrix:
 - `mapper.default_bins[j]` is the bin for an implicit sparse zero in feature `j`;
 - sparse storage contains only values whose bin differs from the default bin;
 - stored sparse values are encoded as `bin_id + 1` so SciPy's implicit zero cannot be
-  confused with actual bin zero.
+  confused with actual bin zero; and
+- encoded sparse-bin values use the smallest safe unsigned dtype: `uint8` through 255,
+  `uint16` through 65,535, `uint32` through 4,294,967,295, otherwise `uint64`.
+  Mapper metadata remain signed `int64`; SciPy structural indices are unchanged and
+  may be signed `int32` or `int64`.
+
+Decode stored values only after widening them to signed `int64`, then subtract one. This
+ensures a malformed stored zero is rejected instead of underflowing in an unsigned dtype.
+
+The private `_encoded_bin_dtype(n_bins)` helper receives the already validated and
+normalized signed `int64` bin-count array and only selects a dtype; metadata validation
+does not happen inside this pure selector.
+
+**OPT2 — compact bin storage.** This is the unsigned encoded-bin representation above.
+It reduces bin-data memory and bandwidth without changing the logical bins, mapper,
+tree structures, or predictions.
+
+`transform_bins` uses the selected encoded dtype for a dense temporary bin matrix. For
+one-based stored values, selected bin IDs are widened to signed `int64` before adding one
+and checking the dtype bound, then narrowed to the selected unsigned dtype. CSC and CSR
+canonicalization completes before the final checks that both sparse data arrays retain
+that dtype.
 
 The first binner is deterministic and frequency-weighted. "Weight" here means the
 integer occurrence count of each distinct feature value, including implicit sparse
@@ -267,6 +288,11 @@ The candidate-boundary scan in this procedure is NumPy-vectorized; it preserves 
 same exact frequency counts, feasible ranges, desired-rank distances, and stable
 lower-boundary tie-break as the reference algorithm. Dense, CSR, CSC, and equivalent
 non-canonical sparse inputs therefore retain identical deterministic mappers.
+
+**OPT1 — vectorized bin-boundary selection.** This is the optimization in the preceding
+candidate-boundary scan: it replaces the per-candidate Python search with NumPy
+cumulative-count, slice, mask, and stable-`argmin` operations while retaining the
+sequential outer boundary loop and identical mapper output.
 
 Constant features consequently have one bin and no cut points. Unseen prediction values
 below, between, or above training values are handled by the same `searchsorted` rule.
@@ -409,7 +435,7 @@ Profile deterministic subsets after sparse parity is correct. The direct-child,
 per-feature implementation is only a correctness oracle; do not start project-scale CV
 with it. Add and test these optimizations in order:
 
-1. compact bin dtypes;
+1. **OPT2 — compact bin dtypes** (complete: encoded sparse-bin values use the smallest safe unsigned dtype);
 2. feature pre-filtering;
 3. vectorized flattened histogram aggregation;
 4. histogram subtraction, checked against direct construction;

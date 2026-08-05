@@ -385,6 +385,18 @@ def fit_bin_mapper(X: Matrix, config: LiteLightGBMConfig) -> BinMapper:
     )
 
 
+def _encoded_bin_dtype(n_bins: np.ndarray) -> np.dtype:
+    """Return the smallest unsigned dtype for validated bin counts."""
+    largest_encoded_bin = int(np.max(n_bins))
+    if largest_encoded_bin <= np.iinfo(np.uint8).max:
+        return np.dtype(np.uint8)
+    if largest_encoded_bin <= np.iinfo(np.uint16).max:
+        return np.dtype(np.uint16)
+    if largest_encoded_bin <= np.iinfo(np.uint32).max:
+        return np.dtype(np.uint32)
+    return np.dtype(np.uint64)
+
+
 def transform_bins(X: Matrix, mapper: BinMapper) -> BinnedDataset:
     """Quantize input with a fitted mapper and return sparse CSR/CSC views."""
     # Keep the validation here independent from the estimator so this helper can
@@ -435,12 +447,15 @@ def transform_bins(X: Matrix, mapper: BinMapper) -> BinnedDataset:
         mapper_cut_points = mapper.cut_points
         mapper_n_features = len(mapper_cut_points)
         raw_defaults = np.asarray(mapper.default_bins)
+        raw_n_bins = np.asarray(mapper.n_bins)
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError("mapper must contain one default bin per feature") from exc
     if (
         n_features != mapper_n_features
         or raw_defaults.ndim != 1
         or raw_defaults.size != n_features
+        or raw_n_bins.ndim != 1
+        or raw_n_bins.size != n_features
     ):
         raise ValueError("X has a different number of features than mapper")
 
@@ -494,6 +509,45 @@ def transform_bins(X: Matrix, mapper: BinMapper) -> BinnedDataset:
         # signed 64-bit array used by the sparse mapping paths.
         defaults[feature] = int(default)
 
+    # Validate n_bins before selecting a compact encoded dtype.  The mapper's
+    # metadata remains signed int64; each feature's count must agree with the
+    # number of cut points used by this transform.
+    n_bins_dtype = raw_n_bins.dtype
+    if (
+        np.issubdtype(n_bins_dtype, np.bool_)
+        or not np.issubdtype(n_bins_dtype, np.number)
+        or np.issubdtype(n_bins_dtype, np.complexfloating)
+    ):
+        raise ValueError("mapper n_bins must be finite integer-valued numeric values")
+    if not np.isfinite(raw_n_bins).all():
+        raise ValueError("mapper n_bins must be finite integer-valued numeric values")
+    if np.issubdtype(n_bins_dtype, np.floating) and np.any(
+        raw_n_bins != np.trunc(raw_n_bins)
+    ):
+        raise ValueError("mapper n_bins must be finite integer-valued numeric values")
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            n_bins = np.asarray(raw_n_bins, dtype=np.int64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("mapper n_bins must be representable as signed int64 values") from exc
+    if np.issubdtype(n_bins_dtype, np.unsignedinteger) and np.any(n_bins < 0):
+        raise ValueError("mapper n_bins must be representable as signed int64 values")
+    if np.issubdtype(n_bins_dtype, np.floating):
+        with np.errstate(over="ignore", invalid="ignore"):
+            round_trip = n_bins.astype(n_bins_dtype)
+        if np.any(round_trip != raw_n_bins):
+            raise ValueError("mapper n_bins must be representable as signed int64 values")
+    if np.any(n_bins <= 0):
+        raise ValueError("mapper n_bins must be positive")
+    expected_n_bins = np.asarray(
+        [cuts.size + 1 for cuts in cuts_by_feature], dtype=np.int64
+    )
+    if np.any(n_bins != expected_n_bins):
+        raise ValueError("mapper n_bins must match cut-point bin counts")
+
+    encoded_dtype = _encoded_bin_dtype(n_bins)
+    encoded_max = int(np.iinfo(encoded_dtype).max)
+
     if sparse_input:
         # Build the output directly in CSC form, preserving sparsity even when
         # the source has millions of rows/features.  Only entries whose mapped
@@ -518,7 +572,14 @@ def transform_bins(X: Matrix, mapper: BinMapper) -> BinnedDataset:
                 output_indices_parts.append(
                     np.asarray(matrix.indices[start:end][keep], dtype=np.int64)
                 )
-                output_data_parts.append(bins[keep] + np.int64(1))
+                # Keep the addition in signed int64, then narrow only after
+                # checking that the encoded value fits the selected dtype.
+                encoded_values = bins[keep] + np.int64(1)
+                if np.any(encoded_values > encoded_max):
+                    raise ValueError("encoded bins exceed selected dtype range")
+                output_data_parts.append(
+                    np.asarray(encoded_values, dtype=encoded_dtype)
+                )
             output_indptr[feature + 1] = np.int64(
                 output_indptr[feature]
                 + int(np.count_nonzero(keep))
@@ -529,11 +590,12 @@ def transform_bins(X: Matrix, mapper: BinMapper) -> BinnedDataset:
             output_data = np.concatenate(output_data_parts)
         else:
             output_indices = np.empty(0, dtype=np.int64)
-            output_data = np.empty(0, dtype=np.int64)
+            output_data = np.empty(0, dtype=encoded_dtype)
 
         csc = sp.csc_matrix(
             (output_data, output_indices, output_indptr),
             shape=(n_samples, n_features),
+            dtype=encoded_dtype,
         )
         # The construction above is already duplicate-free and sorted because
         # the source CSC was canonicalized.  Keep these calls as defensive
@@ -544,7 +606,7 @@ def transform_bins(X: Matrix, mapper: BinMapper) -> BinnedDataset:
     else:
         # Dense input may be mapped in a temporary dense integer array; sparse
         # inputs take the direct CSC path above and are never converted here.
-        bins_matrix = np.empty((n_samples, n_features), dtype=np.int64)
+        bins_matrix = np.empty((n_samples, n_features), dtype=encoded_dtype)
         for feature in range(n_features):
             bins_matrix[:, feature] = np.asarray(
                 np.searchsorted(
@@ -552,18 +614,25 @@ def transform_bins(X: Matrix, mapper: BinMapper) -> BinnedDataset:
                     matrix[:, feature],
                     side="left",
                 ),
-                dtype=np.int64,
+                dtype=encoded_dtype,
             )
 
         rows, columns = np.nonzero(bins_matrix != defaults[np.newaxis, :])
         if rows.size:
-            values = bins_matrix[rows, columns] + np.int64(1)
+            # Compute the one-based value in a signed type before narrowing;
+            # this avoids unsigned overflow when a bin equals 255, 65,535,
+            # or 4,294,967,295 at a dtype boundary.
+            bin_ids = np.asarray(bins_matrix[rows, columns], dtype=np.int64)
+            encoded_values = bin_ids + np.int64(1)
+            if np.any(encoded_values > encoded_max):
+                raise ValueError("encoded bins exceed selected dtype range")
+            values = np.asarray(encoded_values, dtype=encoded_dtype)
         else:
-            values = np.empty(0, dtype=np.int64)
+            values = np.empty(0, dtype=encoded_dtype)
         csc = sp.csc_matrix(
             (values, (rows, columns)),
             shape=(n_samples, n_features),
-            dtype=np.int64,
+            dtype=encoded_dtype,
         )
         csc.sum_duplicates()
         csc.eliminate_zeros()
@@ -573,6 +642,8 @@ def transform_bins(X: Matrix, mapper: BinMapper) -> BinnedDataset:
     csr.sum_duplicates()
     csr.eliminate_zeros()
     csr.sort_indices()
+    if csc.data.dtype != encoded_dtype or csr.data.dtype != encoded_dtype:
+        raise ValueError("sparse encoded-bin dtype was not preserved")
     return BinnedDataset(csr=csr, csc=csc, mapper=mapper)
 
 
