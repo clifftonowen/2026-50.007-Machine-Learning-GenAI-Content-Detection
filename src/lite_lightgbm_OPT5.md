@@ -14,12 +14,75 @@ It must not use scikit-learn or densify the feature matrix.
 
 ## Status
 
-Complete. Histogram construction now uses deterministic, bounded CSR row blocks
-and flattened tree-local bin keys with `np.bincount` aggregation. The previous
+Implemented and verified on the supplied 20,000 x 5,000 representation.
+Histogram construction now uses deterministic, bounded CSR row blocks and
+flattened tree-local bin keys with `np.bincount` aggregation. The previous
 per-feature CSC implementation remains as the private `_build_histogram_direct`
 reference oracle for parity tests. The checked public helper and the trusted
-`fit_tree` context validate CSR encoded-bin storage before entering the optimized
-kernel.
+`fit_tree` context validate CSR encoded-bin storage before entering the
+optimized kernel.
+
+The required 40,385-feature root-memory benchmark remains pending. Do not call
+the full OPT5 acceptance gate complete until that measurement confirms the
+temporary-memory bound on the chosen representation.
+
+## Verification evidence (2026-08-06)
+
+### Differential model sweep
+
+A 525-fit comparison against the direct histogram path produced identical
+predicted labels in every fit. The maximum raw-score difference was `2.7e-15`.
+Two fits selected different tree splits because the CSR/`bincount` accumulation
+order perturbed nearly equal gains:
+
+| Case | Vectorized split | Direct split | Interpretation |
+| --- | --- | --- | --- |
+| `t14/c0` | feature 1, bin 0, gain `0.9303916629429135` | feature 0, bin 1, gain `0.9303916629429133` | Difference `2.2e-16`, or one ULP. The gains are not exactly equal after accumulation, so the exact lower-feature tie-break does not apply. |
+| `t23/c6` | feature 2, bin 0, gain about `2.66e-15` | feature 0, bin 0, gain about `4.44e-16` | Both gains are floating-point noise above `min_split_gain=0`; OPT5 changes which noise-level split wins, not whether the scalar path can accept one. |
+
+These cases satisfy the numerical-behavior contract: report genuine near-ties
+rather than rounding histograms or adding a hidden gain tolerance. A caller that
+wants to suppress noise-level splits may set a positive `min_split_gain`
+explicitly. OPT5 does not replace the documented strict gain rule with an
+implicit floor.
+
+### Supplied-matrix benchmark
+
+The benchmark used the full 20,000 x 5,000 sparse representation with
+1,356,986 stored values. Histogram results had exactly equal counts, maximum
+absolute gradient difference `5.7e-14`, and maximum absolute Hessian difference
+`0.0`.
+
+| Leaf | Vectorized | Direct CSC | Speedup |
+| --- | ---: | ---: | ---: |
+| Root, 20,000 rows | 0.0817 s | 0.3490 s | 4.27x |
+| One quarter, 5,000 rows | 0.0237 s | 0.3025 s | 12.79x |
+| One thirty-second, 625 rows | 0.0098 s | 0.2713 s | 27.76x |
+
+The direct path loops over selected features regardless of leaf size, whereas
+the vectorized path scales primarily with the leaf's stored values. The benefit
+therefore grows for deeper, smaller leaves.
+
+Three interleaved 31-leaf tree rounds took `58.6 / 54.2 / 53.6` seconds with
+OPT5 and `67.7 / 65.5 / 68.9` seconds with the direct path. Median times were
+54.16 and 67.65 seconds respectively, a 1.25x complete-tree speedup. That fixed
+benchmark produced identical 61-node tree structures.
+
+### Temporary memory
+
+The full root histogram's traced peak temporary allocation was 79.7 MB for the
+vectorized path and 10.3 MB for the direct path. This is bounded working memory,
+not retained model state or a leak. At the current
+`_HISTOGRAM_BLOCK_NNZ = 1_000_000`, the observed vectorized peak is roughly 80
+bytes per permitted source nonzero in a block. Lowering the private block budget
+should reduce that component approximately linearly while increasing the number
+of aggregation blocks.
+
+The 40,385-feature check is still required because its complete matrix contains
+about 34.8 million stored values. The design strongly suggests that peak memory
+will remain governed by the one-million-entry block budget, local total-bin
+arrays, and row metadata rather than total matrix nonzeros, but that argument is
+not a substitute for the specified measurement.
 
 ## Flattened key definition
 

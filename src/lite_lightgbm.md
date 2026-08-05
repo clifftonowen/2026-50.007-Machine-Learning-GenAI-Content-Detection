@@ -477,9 +477,11 @@ with it. Add and test these optimizations in order:
 3. **OPT4 — validated internal hot paths** (complete: `fit_tree` validates
    shared immutable state once, while checked public helper wrappers retain
    their direct-call validation);
-4. **OPT5 — vectorized flattened histogram aggregation** (complete: bounded
-   CSR row blocks aggregate flattened local-bin keys with `np.bincount`, while
-   the direct CSC path remains a private test oracle);
+4. **OPT5 — vectorized flattened histogram aggregation** (implemented and
+   verified on the supplied 5,000-feature representation: bounded CSR row
+   blocks aggregate flattened local-bin keys with `np.bincount`, while the
+   direct CSC path remains a private test oracle; the 40,385-feature root-memory
+   benchmark remains pending);
 5. **OPT8 — vectorized split evaluation** within each feature;
 6. **OPT6 — histogram subtraction**, checked against direct construction;
 7. **OPT7 — bounded histogram caching**.

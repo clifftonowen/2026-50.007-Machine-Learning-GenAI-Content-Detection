@@ -46,11 +46,15 @@ Optimization 4 is complete. Tree fitting validates shared immutable input once
 and then uses private trusted histogram, split-search, and partition kernels;
 the public development helpers remain fully validating checked entry points.
 
-Optimization 5 is complete. Histogram construction now processes bounded CSR
-row blocks, maps stored bins into the tree-local flattened histogram layout,
-and aggregates gradients, Hessians, and exact counts with `np.bincount`.
-Implicit sparse defaults are added from each leaf's totals afterward. The former
-per-feature CSC routine remains a private reference oracle for parity tests.
+Optimization 5 is implemented and verified on the supplied 5,000-feature
+representation. Histogram construction now processes bounded CSR row blocks,
+maps stored bins into the tree-local flattened histogram layout, and aggregates
+gradients, Hessians, and exact counts with `np.bincount`. Implicit sparse
+defaults are added from each leaf's totals afterward. The former per-feature
+CSC routine remains a private reference oracle for parity tests. Its specified
+40,385-feature root-memory benchmark remains pending; measured evidence and the
+two reported floating-point near-tie split changes are recorded in
+`lite_lightgbm_OPT5.md`.
 
 Optimizations 6-8 remain implementation plans and do not change current usage:
 histogram subtraction, bounded histogram caching, and vectorized split
