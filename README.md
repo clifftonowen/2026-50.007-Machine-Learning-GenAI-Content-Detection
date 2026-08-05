@@ -98,6 +98,9 @@ short carry-forward note saying what it hands to the next.
 | `notebooks/04_models.ipynb` | **Task 3** — classical-ML model exploration (no deep learning / no LLMs) |
 | `notebooks/05_tuning.ipynb` | **Task 3** — two-stage hyperparameter search |
 | `notebooks/06_holdout.ipynb` | **Task 3** — final holdout eval + submission CSV |
+| `notebooks/18_sparse_linear.ipynb` | **Task 3** — fold-fitted char/word TF-IDF with LinearSVC, LogReg and NB-SVM |
+| `notebooks/19_rawtext_ensemble.ipynb` | **Task 3** — OOF rank blend of tuned raw-text LightGBM and the confirmed linear model |
+| `notebooks/20_domain_adaptation.ipynb` | **Task 3** — adversarial validation, gated importance weighting and corrected clustering |
 
 Run `01_eda.ipynb` first on a fresh clone: it builds and saves the shared train/holdout
 split that every later notebook loads, so everyone trains on the exact same data.
