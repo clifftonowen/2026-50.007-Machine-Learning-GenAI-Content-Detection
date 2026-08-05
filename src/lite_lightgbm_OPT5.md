@@ -12,6 +12,15 @@ the trusted internal kernel from optimization 4. It must retain a direct
 reference implementation for tests until histogram subtraction is verified.
 It must not use scikit-learn or densify the feature matrix.
 
+## Status
+
+Complete. Histogram construction now uses deterministic, bounded CSR row blocks
+and flattened tree-local bin keys with `np.bincount` aggregation. The previous
+per-feature CSC implementation remains as the private `_build_histogram_direct`
+reference oracle for parity tests. The checked public helper and the trusted
+`fit_tree` context validate CSR encoded-bin storage before entering the optimized
+kernel.
+
 ## Flattened key definition
 
 For a stored non-default entry with original feature `j`, local feature slot
@@ -165,4 +174,3 @@ tree, to confirm the temporary-memory bound.
 - Peak temporary memory remains bounded on the full chosen representation.
 - The vectorized path materially improves histogram and 31-leaf tree time.
 - The sparse matrix is never densified.
-

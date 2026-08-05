@@ -477,8 +477,10 @@ with it. Add and test these optimizations in order:
 3. **OPT4 — validated internal hot paths** (complete: `fit_tree` validates
    shared immutable state once, while checked public helper wrappers retain
    their direct-call validation);
-4. **OPT8 — vectorized split evaluation** within each feature;
-5. **OPT5 — vectorized flattened histogram aggregation**;
+4. **OPT5 — vectorized flattened histogram aggregation** (complete: bounded
+   CSR row blocks aggregate flattened local-bin keys with `np.bincount`, while
+   the direct CSC path remains a private test oracle);
+5. **OPT8 — vectorized split evaluation** within each feature;
 6. **OPT6 — histogram subtraction**, checked against direct construction;
 7. **OPT7 — bounded histogram caching**.
 
@@ -490,7 +492,7 @@ tie-break.
 
 Measured profiling identifies the scalar threshold loop as the dominant tree-building
 cost, while OPT4's one-time validation removes only a small fraction of total work.
-OPT8 is therefore the next priority; OPT5-7 are not logical prerequisites for it.
+OPT8 is therefore the next priority; OPT6-7 are not logical prerequisites for it.
 
 The extraction-only module refactor in `lite_lightgbm_refac.md` is complete.
 It preserved the `src.lite_lightgbm` façade and exact behavior; OPT3 behavior

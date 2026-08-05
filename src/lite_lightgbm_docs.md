@@ -46,16 +46,21 @@ Optimization 4 is complete. Tree fitting validates shared immutable input once
 and then uses private trusted histogram, split-search, and partition kernels;
 the public development helpers remain fully validating checked entry points.
 
-Optimizations 5-8 remain implementation plans and do not change current usage:
-vectorized flattened histogram aggregation, histogram subtraction, bounded
-histogram caching, and vectorized split evaluation. Their detailed contracts
-are in the corresponding
-`lite_lightgbm_OPT4.md` through `lite_lightgbm_OPT8.md` files. Project-scale
+Optimization 5 is complete. Histogram construction now processes bounded CSR
+row blocks, maps stored bins into the tree-local flattened histogram layout,
+and aggregates gradients, Hessians, and exact counts with `np.bincount`.
+Implicit sparse defaults are added from each leaf's totals afterward. The former
+per-feature CSC routine remains a private reference oracle for parity tests.
+
+Optimizations 6-8 remain implementation plans and do not change current usage:
+histogram subtraction, bounded histogram caching, and vectorized split
+evaluation. Their detailed contracts are in the corresponding
+`lite_lightgbm_OPT6.md` through `lite_lightgbm_OPT8.md` files. Project-scale
 training should wait until this performance-critical sequence is implemented
 and benchmarked.
 
 Profiling identifies scalar split evaluation as the next performance priority,
-so OPT8 may be implemented before OPT5-7; those optimizations are not logical
+so OPT8 may be implemented before OPT6-7; those optimizations are not logical
 prerequisites for it.
 
 ## Import and module layout

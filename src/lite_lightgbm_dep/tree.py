@@ -13,6 +13,13 @@ from .binning import BinnedDataset, BinMapper
 from .core import EPSILON, LiteLightGBMConfig, soft_threshold
 
 
+# Histogram construction is bounded by source CSR entries rather than by the
+# number of rows or features.  A single unusually dense row is still handled
+# as one block, so this is only a target for temporary arrays, not a hard
+# restriction on input rows.
+_HISTOGRAM_BLOCK_NNZ = 1_000_000
+
+
 @dataclass(frozen=True, slots=True)
 class HistogramLayout:
     """Immutable tree-local flattened histogram layout.
@@ -391,6 +398,13 @@ def _validate_tree_storage(
         np.any(csr_indices < 0) or np.any(csr_indices >= n_features)
     ):
         raise ValueError("data CSR column indices are outside the dataset range")
+    csr_encoded = _normalize_tree_integer_metadata(
+        csr_data, "data CSR encoded bins"
+    )
+    if csr_encoded.size:
+        csr_bin_limits = n_bins[csr_indices]
+        if np.any(csr_encoded < 1) or np.any(csr_encoded > csr_bin_limits):
+            raise ValueError("data CSR encoded bins are outside mapper ranges")
     # Compare adjacent stored columns in one pass, masking the boundaries
     # between rows so entries from separate rows are never compared.  Row
     # labels are looked up only for stored positions, keeping temporary
@@ -465,6 +479,7 @@ def build_histogram(
     # features while all direct helper callers retain the original contract.
     try:
         n_samples, n_features = (int(data.shape[0]), int(data.shape[1]))
+        csr = data.csr
         mapper = data.mapper
         raw_offsets = np.asarray(mapper.bin_offsets)
         raw_n_bins = np.asarray(mapper.n_bins)
@@ -540,6 +555,53 @@ def build_histogram(
         raise ValueError("data mapper bin offsets must match n_bins")
     if np.any(raw_defaults < 0) or np.any(raw_defaults >= raw_n_bins):
         raise ValueError("data mapper default bins are outside feature bin ranges")
+
+    # The optimized kernel reads the row-oriented sparse view directly.  Keep
+    # all CSR structural and encoded-bin checks in this public wrapper so the
+    # trusted kernel can process blocks without repeating per-entry guards.
+    if not sp.isspmatrix_csr(csr) or tuple(csr.shape) != (n_samples, n_features):
+        raise ValueError("data CSR view must match its declared shape")
+    try:
+        csr_indptr = np.asarray(csr.indptr)
+        csr_indices = np.asarray(csr.indices)
+        csr_data = np.asarray(csr.data)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("data CSR view has invalid sparse storage") from exc
+    if (
+        csr_indptr.ndim != 1
+        or csr_indptr.size != n_samples + 1
+        or not np.issubdtype(csr_indptr.dtype, np.integer)
+        or csr_indices.ndim != 1
+        or csr_data.ndim != 1
+        or csr_indices.size != csr_data.size
+        or not np.issubdtype(csr_indices.dtype, np.integer)
+    ):
+        raise ValueError("data CSR view has invalid sparse storage")
+    if csr_indptr.size and (
+        np.any(csr_indptr < 0)
+        or np.any(csr_indptr[1:] < csr_indptr[:-1])
+        or int(csr_indptr[-1]) != int(csr_data.size)
+    ):
+        raise ValueError("data CSR row pointers are invalid")
+    if csr_indices.size and (
+        np.any(csr_indices < 0) or np.any(csr_indices >= n_features)
+    ):
+        raise ValueError("data CSR column indices are outside the dataset range")
+    if csr_indices.size > 1:
+        csr_positions = np.arange(csr_indices.size, dtype=np.intp)
+        csr_row_labels = np.searchsorted(
+            csr_indptr, csr_positions, side="right"
+        )
+        if np.any(
+            (csr_indices[1:] <= csr_indices[:-1])
+            & (csr_row_labels[1:] == csr_row_labels[:-1])
+        ):
+            raise ValueError("data CSR rows must have sorted unique columns")
+    encoded_csr = _normalize_integer_metadata(csr_data, "CSR encoded bins")
+    if encoded_csr.size:
+        csr_bin_limits = raw_n_bins[csr_indices]
+        if np.any(encoded_csr < 1) or np.any(encoded_csr > csr_bin_limits):
+            raise ValueError("data CSR encoded bins are outside mapper ranges")
 
     # The adjacent-difference check implies this equality, but keep the final
     # prefix total explicit and compute it in Python integers to avoid int64
@@ -623,7 +685,7 @@ def build_histogram(
     )
 
 
-def _build_histogram_validated(
+def _build_histogram_direct(
     *,
     data: BinnedDataset,
     rows: np.ndarray,
@@ -636,7 +698,7 @@ def _build_histogram_validated(
     defaults: np.ndarray,
     total_bins: int,
 ) -> Histogram:
-    """Build a histogram from normalized, validated internal state.
+    """Reference histogram implementation using one CSC feature at a time.
 
     ``build_histogram`` owns all user-facing checks.  Callers of this kernel
     must provide signed integer indices, finite float arrays, canonical CSC
@@ -717,6 +779,142 @@ def _build_histogram_validated(
         gradient_sums[default_offset] += leaf_gradient - represented_gradient
         hessian_sums[default_offset] += leaf_hessian - represented_hessian
         counts[default_offset] += np.int64(rows.size - represented_count)
+
+    return Histogram(
+        gradient_sums=gradient_sums,
+        hessian_sums=hessian_sums,
+        counts=counts,
+        layout=layout,
+    )
+
+
+def _build_histogram_validated(
+    *,
+    data: BinnedDataset,
+    rows: np.ndarray,
+    features: np.ndarray,
+    gradients: np.ndarray,
+    hessians: np.ndarray,
+    layout: HistogramLayout | None,
+    offsets: np.ndarray,
+    n_bins: np.ndarray,
+    defaults: np.ndarray,
+    total_bins: int,
+) -> Histogram:
+    """Build one histogram by aggregating flattened CSR bin keys.
+
+    The public ``build_histogram`` wrapper and ``fit_tree`` context validate
+    sparse storage and mapper metadata before entering this trusted kernel.
+    In particular, CSR encoded values are already known to be one-based and
+    within their feature's bin range, so blocks only need an inexpensive
+    widening/subtraction before key construction.
+    """
+    gradient_sums = np.zeros(total_bins, dtype=np.float64)
+    hessian_sums = np.zeros(total_bins, dtype=np.float64)
+    counts = np.zeros(total_bins, dtype=np.int64)
+    if rows.size == 0 or features.size == 0:
+        return Histogram(
+            gradient_sums=gradient_sums,
+            hessian_sums=hessian_sums,
+            counts=counts,
+            layout=layout,
+        )
+
+    csr = data.csr
+    if layout is None:
+        # Direct helper calls retain the historical global mapper layout.  The
+        # reverse map stores output segment starts in the original feature
+        # slots, while selected local slots are used only for row-block keys.
+        feature_to_local = np.full(csr.shape[1], -1, dtype=np.int64)
+        feature_to_local[features] = np.arange(features.size, dtype=np.int64)
+        selected_offsets = np.asarray(offsets[features], dtype=np.int64)
+        selected_defaults = np.asarray(defaults[features], dtype=np.int64)
+        local_offsets = selected_offsets
+    else:
+        feature_to_local = layout.feature_to_local
+        local_offsets = layout.bin_offsets
+        selected_defaults = layout.default_bins
+
+    leaf_gradient = float(np.sum(gradients[rows], dtype=np.float64))
+    leaf_hessian = float(np.sum(hessians[rows], dtype=np.float64))
+
+    # Prefix sums over source nonzeros determine deterministic consecutive
+    # row-position blocks.  ``searchsorted`` avoids a Python loop over rows;
+    # the only loop below is over bounded CSR row blocks.
+    row_nnz = np.diff(np.asarray(csr.indptr, dtype=np.int64))
+    selected_row_nnz = row_nnz[rows]
+    row_prefix = np.empty(rows.size + 1, dtype=np.int64)
+    row_prefix[0] = 0
+    np.cumsum(selected_row_nnz, dtype=np.int64, out=row_prefix[1:])
+
+    block_start = 0
+    while block_start < rows.size:
+        target = int(row_prefix[block_start]) + _HISTOGRAM_BLOCK_NNZ
+        block_end = int(np.searchsorted(row_prefix, target, side="right") - 1)
+        # A single row can exceed the target; process that row alone.  The
+        # max also guarantees progress for zero-nnz rows and repeated rows.
+        if block_end <= block_start:
+            block_end = block_start + 1
+
+        block_rows = rows[block_start:block_end]
+        block = csr[block_rows]
+        block_indptr = np.asarray(block.indptr, dtype=np.int64)
+        block_nnz = int(block_indptr[-1])
+        if block_nnz:
+            row_positions = np.repeat(
+                np.arange(block_rows.size, dtype=np.intp),
+                np.diff(block_indptr),
+            )
+            original_columns = np.asarray(block.indices, dtype=np.int64)
+            local_columns = feature_to_local[original_columns]
+            keep = local_columns >= 0
+            if np.any(keep):
+                decoded_bins = np.asarray(block.data, dtype=np.int64) - np.int64(1)
+                kept_rows = row_positions[keep]
+                kept_slots = local_columns[keep]
+                keys = local_offsets[kept_slots] + decoded_bins[keep]
+                block_gradients = gradients[block_rows]
+                block_hessians = hessians[block_rows]
+                gradient_sums += np.bincount(
+                    keys,
+                    weights=block_gradients[kept_rows],
+                    minlength=total_bins,
+                )
+                hessian_sums += np.bincount(
+                    keys,
+                    weights=block_hessians[kept_rows],
+                    minlength=total_bins,
+                )
+                counts += np.bincount(keys, minlength=total_bins)
+
+        block_start = block_end
+
+    # Add implicit default-bin entries after all explicit CSR entries have
+    # been aggregated.  Each represented-total reduction is vectorized across
+    # selected features; no per-feature Python loop remains in this kernel.
+    if layout is None:
+        all_feature_gradient = np.add.reduceat(gradient_sums, offsets[:-1])
+        all_feature_hessian = np.add.reduceat(hessian_sums, offsets[:-1])
+        all_feature_counts = np.add.reduceat(counts, offsets[:-1])
+        represented_gradient = all_feature_gradient[features]
+        represented_hessian = all_feature_hessian[features]
+        represented_counts = all_feature_counts[features]
+        default_offsets = selected_offsets + selected_defaults
+    else:
+        represented_gradient = np.add.reduceat(
+            gradient_sums, local_offsets[:-1]
+        )
+        represented_hessian = np.add.reduceat(
+            hessian_sums, local_offsets[:-1]
+        )
+        represented_counts = np.add.reduceat(counts, local_offsets[:-1])
+        default_offsets = local_offsets[:-1] + selected_defaults
+
+    gradient_sums[default_offsets] += leaf_gradient - represented_gradient
+    hessian_sums[default_offsets] += leaf_hessian - represented_hessian
+    counts[default_offsets] += np.asarray(
+        rows.size - represented_counts, dtype=np.int64
+    )
 
     return Histogram(
         gradient_sums=gradient_sums,
