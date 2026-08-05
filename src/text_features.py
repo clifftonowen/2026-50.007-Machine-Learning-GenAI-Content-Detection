@@ -60,6 +60,17 @@ DENSE_BLOCKS = ("B_punctuation", "C_casing", "D_structure", "E_length",
 FITTED_BLOCKS = ("H_char_ngrams", "I_word_ngrams")
 ALL_BLOCKS = ("A_function_words",) + DENSE_BLOCKS + FITTED_BLOCKS
 
+# Round 7. H and I both cap the vocabulary at 20,000 terms, which keeps only 9.6% of
+# the char n-grams and 14.8% of the word n-grams that clear their own min_df. Worse,
+# `max_features` keeps the most *frequent* terms - the ones human and machine text
+# share - and drops the rare ones where authorial idiosyncrasy lives. The cap was
+# never questioned because every raw-text model so far has been a tree, and 200k
+# sparse columns are hopeless for one. H2/I2 remove the cap for the linear family.
+# Deliberately NOT added to ALL_BLOCKS: that constant is the default argument of
+# `build_blocks` and `load_blocks`, so extending it would break every existing call
+# that relies on the default until these caches are built.
+FULL_BLOCKS = ("H2_char_ngrams_full", "I2_word_ngrams_full")
+
 # Symbols counted by block B. Ordered so the feature names are stable across runs.
 _PUNCT = list(".,;:!?'\"()[]{}<>-_/\\|@#$%^&*+=~`")
 
@@ -540,6 +551,51 @@ def word_ngram_features(train_texts, test_texts, *, max_features=20000, min_df=5
     return Xtr, Xte, [f"I_word_{t}" for t in vec.get_feature_names_out()]
 
 
+def char_ngram_features_full(train_texts, test_texts, *, min_df=3, max_features=None):
+    """Block H2: block H with the 20,000-term cap removed.
+
+    Same vectorizer settings as `char_ngram_features` in every other respect, so the
+    only thing that changes between H and H2 is the vocabulary size (20,000 against
+    ~207,600 at min_df=3). That makes the pair a clean controlled comparison of what
+    the cap costs, rather than two unrelated representations.
+
+    Fitted on `train_texts` only.
+
+    Returns
+    -------
+    Xtr, Xte : sparse CSR, shape (n_train, n_vocab) and (n_test, n_vocab)
+    names : list of str
+    """
+    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5), lowercase=True,
+                          min_df=min_df, max_features=max_features,
+                          sublinear_tf=True, dtype=np.float32)
+    Xtr = vec.fit_transform(train_texts)
+    Xte = vec.transform(test_texts)
+    return Xtr, Xte, [f"H2_char_{t}" for t in vec.get_feature_names_out()]
+
+
+def word_ngram_features_full(train_texts, test_texts, *, min_df=2, max_features=None):
+    """Block I2: block I with the cap removed and min_df lowered from 5 to 2.
+
+    min_df drops as well as the cap because rare word bigrams are exactly the ones a
+    capped, frequency-ranked vocabulary can never reach; holding min_df at 5 would
+    leave most of the tail unreachable and only half-test the hypothesis.
+
+    Fitted on `train_texts` only.
+
+    Returns
+    -------
+    Xtr, Xte : sparse CSR
+    names : list of str
+    """
+    vec = TfidfVectorizer(ngram_range=(1, 2), lowercase=True, stop_words=None,
+                          min_df=min_df, max_features=max_features,
+                          sublinear_tf=True, dtype=np.float32)
+    Xtr = vec.fit_transform(train_texts)
+    Xte = vec.transform(test_texts)
+    return Xtr, Xte, [f"I2_word_{t}" for t in vec.get_feature_names_out()]
+
+
 def build_blocks(train_texts, test_texts, blocks=ALL_BLOCKS):
     """Build every requested block and return them keyed by name.
 
@@ -555,8 +611,9 @@ def build_blocks(train_texts, test_texts, blocks=ALL_BLOCKS):
         returned as CSR too, so downstream code has one code path; they are small
         enough that the overhead does not matter.
     """
-    unknown = [b for b in blocks if b not in ALL_BLOCKS]
-    assert not unknown, f"unknown blocks {unknown}, expected from {ALL_BLOCKS}"
+    known = ALL_BLOCKS + FULL_BLOCKS
+    unknown = [b for b in blocks if b not in known]
+    assert not unknown, f"unknown blocks {unknown}, expected from {known}"
     out = {}
 
     wanted_dense = [b for b in blocks if b in DENSE_BLOCKS]
@@ -583,6 +640,14 @@ def build_blocks(train_texts, test_texts, blocks=ALL_BLOCKS):
     if "I_word_ngrams" in blocks:
         Xtr, Xte, names = word_ngram_features(train_texts, test_texts)
         out["I_word_ngrams"] = {"train": Xtr, "test": Xte, "names": names}
+
+    if "H2_char_ngrams_full" in blocks:
+        Xtr, Xte, names = char_ngram_features_full(train_texts, test_texts)
+        out["H2_char_ngrams_full"] = {"train": Xtr, "test": Xte, "names": names}
+
+    if "I2_word_ngrams_full" in blocks:
+        Xtr, Xte, names = word_ngram_features_full(train_texts, test_texts)
+        out["I2_word_ngrams_full"] = {"train": Xtr, "test": Xte, "names": names}
 
     return out
 
