@@ -1,0 +1,27 @@
+{
+  "lane": "aggregate",
+  "owner": "brian_night_extratrees-lgbm-linsvc-nbsvm",
+  "config": {
+    "kind": "caruana",
+    "n_iters": 25
+  },
+  "auc_mean": 0.8885697788110075,
+  "auc_std": 0.08850737661318743,
+  "f1_mean": 0.7797747085643251,
+  "fold_aucs": [
+    0.7646275373772089,
+    0.9354057033383161,
+    0.9656760957174972
+  ],
+  "auc_insample": 0.8956054887719112,
+  "auc_gap": 0.0070357099609036355,
+  "info": {
+    "weights": [
+      0.0,
+      0.64,
+      0.04,
+      0.32
+    ]
+  },
+  "seconds": 1.51
+}

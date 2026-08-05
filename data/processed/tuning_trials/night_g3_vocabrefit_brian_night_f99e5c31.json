@@ -1,0 +1,14 @@
+{
+  "model": "night_g3_vocabrefit",
+  "owner": "brian_night",
+  "params": {
+    "fit_on": "foldtrain+test"
+  },
+  "mean": 0.8057928880625199,
+  "std": 0.08719923069733576,
+  "scores": [
+    0.6824791123763762,
+    0.8665314645034321,
+    0.8683680873077515
+  ]
+}

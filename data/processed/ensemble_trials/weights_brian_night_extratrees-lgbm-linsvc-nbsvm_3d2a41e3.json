@@ -1,0 +1,26 @@
+{
+  "lane": "weights",
+  "owner": "brian_night_extratrees-lgbm-linsvc-nbsvm",
+  "config": {
+    "kind": "equal"
+  },
+  "auc_mean": 0.8639050452389121,
+  "auc_std": 0.09817927087537812,
+  "f1_mean": 0.7587628543935908,
+  "fold_aucs": [
+    0.7272315193019858,
+    0.9110518500807633,
+    0.9534317663339871
+  ],
+  "auc_insample": 0.8524691300297089,
+  "auc_gap": -0.011435915209203174,
+  "info": {
+    "weights": [
+      0.25,
+      0.25,
+      0.25,
+      0.25
+    ]
+  },
+  "seconds": 0.02
+}

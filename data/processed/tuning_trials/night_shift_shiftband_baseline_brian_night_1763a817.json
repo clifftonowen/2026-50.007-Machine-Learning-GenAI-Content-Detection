@@ -1,0 +1,15 @@
+{
+  "model": "night_shift_shiftband_baseline",
+  "owner": "brian_night",
+  "params": {
+    "bands": 3,
+    "model": "lgbm_defaults"
+  },
+  "mean": 0.8488932189708143,
+  "std": 0.013656399902071303,
+  "scores": [
+    0.8296416621353575,
+    0.857185184438267,
+    0.8598528103388183
+  ]
+}

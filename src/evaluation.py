@@ -5,6 +5,7 @@ shuffle=True, random_state=42, scoring on Macro F1. Import these instead of
 redefining the protocol per notebook.
 """
 
+import numpy as np
 from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 
@@ -59,3 +60,62 @@ def evaluate_model_cv(estimator, X, y, *, cv=None, scoring=SCORING):
         cv = make_cv()
     scores = cross_val_score(estimator, X, y, cv=cv, scoring=scoring)
     return {"scores": scores, "mean": float(scores.mean()), "std": float(scores.std())}
+
+
+class FoldSplitter:
+    """Wrap an explicit fold list in the sklearn splitter interface.
+
+    `clustering.cluster_cv` returns folds as a plain list of (train_idx, test_idx),
+    which `cross_val_score` accepts but `combiners.cv_evaluate` does not (it calls
+    `cv.split(M, y)`). This adapter lets the grouped-fold protocols drive the
+    combiner machinery without changing either side.
+
+    Parameters
+    ----------
+    folds : list of (ndarray, ndarray)
+    """
+
+    def __init__(self, folds):
+        self.folds = list(folds)
+
+    def split(self, X=None, y=None, groups=None):
+        yield from self.folds
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return len(self.folds)
+
+
+def oof_from_folds(estimator, X, y, folds, *, scorer=None):
+    """Out-of-fold scores under an explicit fold list, aligned to the full array.
+
+    `cross_val_predict` requires folds that partition the data; grouped folds from
+    `clustering.cluster_cv` may skip a band, so this fills only the held-out rows
+    and leaves the rest NaN for the caller to check.
+
+    Parameters
+    ----------
+    estimator : sklearn-compatible estimator (cloned per fold)
+    X : array or sparse matrix, shape (n_samples, n_features)
+    y : ndarray, shape (n_samples,)
+    folds : list of (train_idx, test_idx)
+    scorer : callable, optional
+        `(fitted_estimator, X_test) -> scores`. Defaults to
+        `ensemble.member_score` (probability or margin - only ordering is used).
+
+    Returns
+    -------
+    ndarray of float, shape (n_samples,)
+        NaN where no fold held the row out.
+    """
+    from sklearn.base import clone
+
+    from . import ensemble
+
+    if scorer is None:
+        scorer = ensemble.member_score
+    y = np.asarray(y)
+    out = np.full(len(y), np.nan)
+    for tr, te in folds:
+        model = clone(estimator).fit(X[tr], y[tr])
+        out[te] = scorer(model, X[te])
+    return out
