@@ -56,16 +56,38 @@ CSC routine remains a private reference oracle for parity tests. Its specified
 two reported floating-point near-tie split changes are recorded in
 `lite_lightgbm_OPT5.md`.
 
-Optimizations 6-8 remain implementation plans and do not change current usage:
-histogram subtraction, bounded histogram caching, and vectorized split
-evaluation. Their detailed contracts are in the corresponding
-`lite_lightgbm_OPT6.md` through `lite_lightgbm_OPT8.md` files. Project-scale
-training should wait until this performance-critical sequence is implemented
+Optimization 6 is algorithmically complete and has project-scale direct-oracle
+parity. During leaf-wise growth, `fit_tree` retains a histogram only for each
+queued live leaf, directly builds the smaller child (ties go left), and derives
+the other child by subtracting aligned histogram statistics. Empty bins have
+exactly zero statistics; subtraction validates raw residuals before that
+normalization, so material inconsistencies still fail. Construction histograms
+are released before fitting returns and are not part of the trained model. A
+private direct-both-child tree path remains available for parity checks without
+changing the public API.
+
+On the supplied 20,000 by 5,000, 31-leaf representation, three subtraction runs
+took 60.58, 58.93, and 58.60 seconds (median 58.93), while direct runs took
+61.17, 60.85, and 59.75 seconds (median 60.85, 1.03x). Histogram builds fell
+from 59 to 30 and the project-scale trees were bit-identical, but the total
+speed gain was modest. Each local-layout histogram used about 9.03 MB, with an
+observed peak of 17 live histograms (about 153 MB). The unbounded mapping has a
+worst case of about 271 MB at 31 leaves, with an estimated 2.3 GB at 255 leaves;
+OPT7 remains responsible for bounding that memory before larger-scale use.
+
+Synthetic near-tie cases differed in topology in 116 of 300 cases and had six
+label flips, while the dedicated 128-leaf and 1,200-leaf tests showed no
+accumulated histogram-statistic drift.
+
+Optimizations 7-8 remain implementation plans: bounded histogram caching and
+vectorized split evaluation. Their detailed contracts are in
+`lite_lightgbm_OPT7.md` and `lite_lightgbm_OPT8.md`. Project-scale training
+should wait until the remaining performance-critical sequence is implemented
 and benchmarked.
 
 Profiling identifies scalar split evaluation as the next performance priority,
-so OPT8 may be implemented before OPT6-7; those optimizations are not logical
-prerequisites for it.
+so OPT8 may be implemented before OPT7; OPT6 is not a logical prerequisite for
+OPT8.
 
 ## Import and module layout
 

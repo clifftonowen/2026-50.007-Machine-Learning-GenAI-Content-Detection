@@ -195,6 +195,180 @@ class Histogram:
     layout: HistogramLayout | None = None
 
 
+def _subtract_histograms(
+    parent: Histogram,
+    child: Histogram,
+) -> Histogram:
+    """Derive a sibling histogram by subtracting ``child`` from ``parent``.
+
+    Histograms are tree-local, so subtraction is only valid when both objects
+    point at the exact same immutable layout and contain equally shaped
+    flattened arrays.  Floating statistics are widened before subtraction;
+    exact row counts use signed ``int64`` arithmetic.  Empty-bin residuals are
+    checked against scale-aware ``64 * eps`` bounds, while materially negative
+    Hessian residuals in populated bins are rejected as a broken parent/child
+    relationship.
+    """
+    if not isinstance(parent, Histogram) or not isinstance(child, Histogram):
+        raise ValueError("histogram subtraction requires Histogram operands")
+    if parent.layout is not child.layout:
+        raise ValueError("histograms must share the exact same layout")
+
+    try:
+        parent_gradients = np.asarray(parent.gradient_sums)
+        child_gradients = np.asarray(child.gradient_sums)
+        parent_hessians = np.asarray(parent.hessian_sums)
+        child_hessians = np.asarray(child.hessian_sums)
+        parent_counts = np.asarray(parent.counts)
+        child_counts = np.asarray(child.counts)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("histograms must contain numeric arrays") from exc
+
+    arrays = (
+        (parent_gradients, "parent gradient sums"),
+        (child_gradients, "child gradient sums"),
+        (parent_hessians, "parent Hessian sums"),
+        (child_hessians, "child Hessian sums"),
+        (parent_counts, "parent counts"),
+        (child_counts, "child counts"),
+    )
+    for values, name in arrays:
+        if values.ndim != 1:
+            raise ValueError(f"{name} must be one-dimensional")
+
+    expected_shape = parent_gradients.shape
+    if (
+        parent_hessians.shape != expected_shape
+        or parent_counts.shape != expected_shape
+        or child_gradients.shape != expected_shape
+        or child_hessians.shape != expected_shape
+        or child_counts.shape != expected_shape
+    ):
+        raise ValueError("histogram arrays must have identical one-dimensional shapes")
+
+    try:
+        parent_gradient_values = np.asarray(parent_gradients, dtype=np.float64)
+        child_gradient_values = np.asarray(child_gradients, dtype=np.float64)
+        parent_hessian_values = np.asarray(parent_hessians, dtype=np.float64)
+        child_hessian_values = np.asarray(child_hessians, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("histogram gradients and Hessians must be numeric") from exc
+    if (
+        not np.isfinite(parent_gradient_values).all()
+        or not np.isfinite(child_gradient_values).all()
+        or not np.isfinite(parent_hessian_values).all()
+        or not np.isfinite(child_hessian_values).all()
+    ):
+        raise ValueError("histogram gradients and Hessians must be finite")
+
+    # Counts are sufficient statistics, not weights: require integer-valued
+    # storage and widen compact unsigned/signed dtypes without allowing a
+    # uint64 value to wrap into a negative int64 count.
+    count_arrays = (
+        (parent_counts, "parent counts"),
+        (child_counts, "child counts"),
+    )
+    normalized_counts: list[np.ndarray] = []
+    for values, name in count_arrays:
+        if not np.issubdtype(values.dtype, np.integer) or np.issubdtype(
+            values.dtype, np.bool_
+        ):
+            raise ValueError(f"{name} must use an integer dtype")
+        if np.issubdtype(values.dtype, np.unsignedinteger) and np.any(
+            values > np.iinfo(np.int64).max
+        ):
+            raise ValueError(f"{name} must be representable as signed int64")
+        normalized = np.asarray(values, dtype=np.int64)
+        if np.any(normalized < 0):
+            raise ValueError(f"{name} must not contain negative counts")
+        normalized_counts.append(normalized)
+
+    parent_count_values, child_count_values = normalized_counts
+    derived_gradients = np.subtract(
+        parent_gradient_values, child_gradient_values, dtype=np.float64
+    )
+    derived_hessians = np.subtract(
+        parent_hessian_values, child_hessian_values, dtype=np.float64
+    )
+    derived_counts = np.subtract(
+        parent_count_values, child_count_values, dtype=np.int64
+    )
+    if not np.isfinite(derived_gradients).all() or not np.isfinite(
+        derived_hessians
+    ).all():
+        raise ValueError("histogram subtraction produced non-finite statistics")
+    if np.any(derived_counts < 0):
+        raise ValueError("histogram subtraction produced negative counts")
+    empty_bins = derived_counts == 0
+
+    # Directly built child and parent sums can differ by a few ulps even when
+    # the child contains every row in a bin.  The optimized kernel computes
+    # implicit default bins by subtracting represented sums from a leaf total,
+    # so a nominally empty sibling can inherit roundoff at the scale of that
+    # total rather than its tiny per-bin value.  Account for that accumulated
+    # summation error with a modest epsilon multiple.  Empty-bin gradient and
+    # Hessian residuals must remain within this bound before their statistics
+    # are normalized away.  For populated bins, only a materially negative
+    # Hessian signals a broken layout/partition relationship.
+    # A unit floor is intentional: when both bin sums are near zero, the
+    # residual came from subtracting leaf totals whose absolute scale is not
+    # represented by this bin's tiny value.
+    gradient_scale = np.maximum(
+        np.abs(parent_gradient_values) + np.abs(child_gradient_values), 1.0
+    )
+    gradient_tolerance = (
+        64.0
+        * np.finfo(np.float64).eps
+        * gradient_scale
+    )
+    hessian_scale = np.maximum(
+        np.abs(parent_hessian_values) + np.abs(child_hessian_values), 1.0
+    )
+    hessian_tolerance = (
+        64.0
+        * np.finfo(np.float64).eps
+        * hessian_scale
+    )
+
+    if np.any(
+        empty_bins
+        & (np.abs(derived_gradients) > gradient_tolerance)
+    ):
+        raise ValueError(
+            "histogram subtraction produced materially non-zero gradients "
+            "in zero-count bins"
+        )
+    if np.any(
+        empty_bins
+        & (np.abs(derived_hessians) > hessian_tolerance)
+    ):
+        raise ValueError(
+            "histogram subtraction produced materially inconsistent Hessians "
+            "in zero-count bins"
+        )
+
+    # Zero-count bins are required to have no statistics after the raw
+    # residuals above have been validated.  This normalization is intentionally
+    # count-aware; gradients in nonempty bins are never clamped.
+    derived_gradients[empty_bins] = 0.0
+    derived_hessians[empty_bins] = 0.0
+
+    small_negative = (derived_hessians < 0.0) & (
+        derived_hessians >= -hessian_tolerance
+    )
+    if np.any(small_negative):
+        derived_hessians[small_negative] = 0.0
+    if np.any(derived_hessians < -hessian_tolerance):
+        raise ValueError("histogram subtraction produced materially negative Hessians")
+
+    return Histogram(
+        gradient_sums=derived_gradients,
+        hessian_sums=derived_hessians,
+        counts=derived_counts,
+        layout=parent.layout,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SplitInfo:
     """Best valid split and its left/right sufficient statistics."""
@@ -780,6 +954,14 @@ def _build_histogram_direct(
         hessian_sums[default_offset] += leaf_hessian - represented_hessian
         counts[default_offset] += np.int64(rows.size - represented_count)
 
+    # A zero-count bin cannot contain any sufficient statistics.  In
+    # particular, default-bin remainder arithmetic can leave a tiny residual
+    # in an otherwise empty bin; normalize it away so subtraction and split
+    # comparisons never observe impossible statistics.
+    empty_bins = counts == 0
+    gradient_sums[empty_bins] = 0.0
+    hessian_sums[empty_bins] = 0.0
+
     return Histogram(
         gradient_sums=gradient_sums,
         hessian_sums=hessian_sums,
@@ -915,6 +1097,12 @@ def _build_histogram_validated(
     counts[default_offsets] += np.asarray(
         rows.size - represented_counts, dtype=np.int64
     )
+
+    # Keep the optimized kernel's output physically consistent: bins with no
+    # represented rows have exactly zero sufficient statistics.
+    empty_bins = counts == 0
+    gradient_sums[empty_bins] = 0.0
+    hessian_sums[empty_bins] = 0.0
 
     return Histogram(
         gradient_sums=gradient_sums,
@@ -1565,15 +1753,17 @@ def _partition_rows_validated(
     return rows[go_left], rows[~go_left]
 
 
-def fit_tree(
+def _fit_tree(
     data: BinnedDataset,
     gradients: np.ndarray,
     hessians: np.ndarray,
     row_indices: np.ndarray,
     feature_indices: np.ndarray,
     config: LiteLightGBMConfig,
+    *,
+    use_histogram_subtraction: bool,
 ) -> DecisionTree:
-    """Fit one histogram tree using leaf-wise best-first growth."""
+    """Fit one tree, optionally using histogram subtraction for child leaves."""
     # Keep the tree builder's validation local to the arguments it consumes.
     # ``build_histogram`` and ``find_best_split`` perform the detailed mapper
     # and histogram checks; these checks ensure root statistics can be computed
@@ -1744,6 +1934,10 @@ def fit_tree(
     # tie-break.  The SplitInfo object is never compared because node indices
     # are unique for every live candidate.
     queue: list[tuple[float, int, int, int, SplitInfo]] = []
+    # Construction-only state: every queued candidate has exactly one
+    # histogram retained here, and entries are removed as soon as candidates
+    # are popped.  Histograms are never attached to the fitted tree nodes.
+    live_histograms: dict[int, Histogram] = {}
     root_histogram = _build_histogram_validated(
         data=context.data,
         rows=rows,
@@ -1786,16 +1980,28 @@ def fit_tree(
                     root_split,
                 ),
             )
+            live_histograms[0] = root_histogram
+    # If the root is terminal its histogram is no longer needed.  When it is
+    # queued, the mapping above is the sole remaining owner after this scope.
+    del root_histogram
 
     while queue and leaves < num_leaves:
         _, _, _, node_index, split = heapq.heappop(queue)
+        try:
+            parent_histogram = live_histograms.pop(node_index)
+        except KeyError as exc:
+            raise RuntimeError(
+                f"missing live histogram for queued split node {node_index}"
+            ) from exc
         current_rows = node_rows[node_index]
         if current_rows is None:
             # Defensive guard for malformed/stale candidates; normal growth
             # enqueues each leaf exactly once and never reaches this branch.
+            del parent_histogram
             continue
         parent = nodes[node_index]
         if max_depth > 0 and parent.depth >= max_depth:
+            del parent_histogram
             continue
 
         left_rows, right_rows = _partition_rows_validated(
@@ -1853,23 +2059,79 @@ def fit_tree(
         # reason to build child histograms.  Otherwise, only children below
         # the depth cap can produce queue candidates.
         if leaves >= num_leaves:
+            del parent_histogram
             continue
         child_depth = parent.depth + 1
         if max_depth > 0 and child_depth >= max_depth:
+            del parent_histogram
             continue
 
-        left_histogram = _build_histogram_validated(
-            data=context.data,
-            rows=left_rows,
-            features=context.features,
-            gradients=context.gradients,
-            hessians=context.hessians,
-            layout=context.layout,
-            offsets=context.offsets,
-            n_bins=context.n_bins,
-            defaults=context.defaults,
-            total_bins=int(context.layout.bin_offsets[-1]),
-        )
+        if use_histogram_subtraction:
+            # Build only the smaller child directly (ties deterministically
+            # choose the left child), then derive the sibling from the popped
+            # parent.  The private oracle below retains the direct-both-child
+            # construction for parity checks without changing public APIs.
+            if left_rows.size <= right_rows.size:
+                left_histogram = _build_histogram_validated(
+                    data=context.data,
+                    rows=left_rows,
+                    features=context.features,
+                    gradients=context.gradients,
+                    hessians=context.hessians,
+                    layout=context.layout,
+                    offsets=context.offsets,
+                    n_bins=context.n_bins,
+                    defaults=context.defaults,
+                    total_bins=int(context.layout.bin_offsets[-1]),
+                )
+                right_histogram = _subtract_histograms(
+                    parent_histogram, left_histogram
+                )
+            else:
+                right_histogram = _build_histogram_validated(
+                    data=context.data,
+                    rows=right_rows,
+                    features=context.features,
+                    gradients=context.gradients,
+                    hessians=context.hessians,
+                    layout=context.layout,
+                    offsets=context.offsets,
+                    n_bins=context.n_bins,
+                    defaults=context.defaults,
+                    total_bins=int(context.layout.bin_offsets[-1]),
+                )
+                left_histogram = _subtract_histograms(
+                    parent_histogram, right_histogram
+                )
+        else:
+            # Private direct-both-child oracle used to compare complete tree
+            # growth against subtraction while sharing all queue semantics.
+            left_histogram = _build_histogram_validated(
+                data=context.data,
+                rows=left_rows,
+                features=context.features,
+                gradients=context.gradients,
+                hessians=context.hessians,
+                layout=context.layout,
+                offsets=context.offsets,
+                n_bins=context.n_bins,
+                defaults=context.defaults,
+                total_bins=int(context.layout.bin_offsets[-1]),
+            )
+            right_histogram = _build_histogram_validated(
+                data=context.data,
+                rows=right_rows,
+                features=context.features,
+                gradients=context.gradients,
+                hessians=context.hessians,
+                layout=context.layout,
+                offsets=context.offsets,
+                n_bins=context.n_bins,
+                defaults=context.defaults,
+                total_bins=int(context.layout.bin_offsets[-1]),
+            )
+        del parent_histogram
+
         left_split = _find_best_split_validated(
             gradients=left_histogram.gradient_sums,
             hessians=left_histogram.hessian_sums,
@@ -1899,19 +2161,8 @@ def fit_tree(
                     left_split,
                 ),
             )
+            live_histograms[left_index] = left_histogram
 
-        right_histogram = _build_histogram_validated(
-            data=context.data,
-            rows=right_rows,
-            features=context.features,
-            gradients=context.gradients,
-            hessians=context.hessians,
-            layout=context.layout,
-            offsets=context.offsets,
-            n_bins=context.n_bins,
-            defaults=context.defaults,
-            total_bins=int(context.layout.bin_offsets[-1]),
-        )
         right_split = _find_best_split_validated(
             gradients=right_histogram.gradient_sums,
             hessians=right_histogram.hessian_sums,
@@ -1941,8 +2192,33 @@ def fit_tree(
                     right_split,
                 ),
             )
+            live_histograms[right_index] = right_histogram
+        # Any histogram not retained for a queued candidate can be released at
+        # the end of this iteration.  ``live_histograms`` owns retained ones.
+        del left_histogram, right_histogram
 
+    live_histograms.clear()
     return DecisionTree(nodes=nodes, feature_indices=features)
+
+
+def fit_tree(
+    data: BinnedDataset,
+    gradients: np.ndarray,
+    hessians: np.ndarray,
+    row_indices: np.ndarray,
+    feature_indices: np.ndarray,
+    config: LiteLightGBMConfig,
+) -> DecisionTree:
+    """Fit one histogram tree using leaf-wise best-first growth."""
+    return _fit_tree(
+        data,
+        gradients,
+        hessians,
+        row_indices,
+        feature_indices,
+        config,
+        use_histogram_subtraction=True,
+    )
 
 
 def predict_tree_raw(tree: DecisionTree, data: BinnedDataset) -> np.ndarray:

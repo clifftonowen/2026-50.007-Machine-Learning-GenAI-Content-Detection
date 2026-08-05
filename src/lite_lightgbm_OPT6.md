@@ -1,5 +1,42 @@
 # LiteLightGBM optimization 6: histogram subtraction
 
+## Status
+
+**Algorithmic implementation and project-scale parity complete; total-speed gain
+modest.** `fit_tree`
+retains construction-only histograms for queued live leaves, directly builds
+the smaller child (breaking equal sizes toward the left), and derives the
+sibling by layout-safe subtraction. Derived counts are exact. Every
+zero-count bin is normalized to exactly zero gradient and Hessian statistics,
+but only after subtraction validates that its raw residual is within the
+documented machine-precision tolerance; material positive or negative
+inconsistencies still raise. Histograms are released during construction and
+are never retained by `DecisionTree`.
+
+The private `_fit_tree(..., use_histogram_subtraction=False)` path preserves a
+direct-both-child oracle for regression checks without changing the public
+`fit_tree` API. Focused direct-versus-subtraction checks verify exact counts,
+close floating statistics, deterministic repeated fits, and one direct
+child-histogram build per expandable accepted split. Synthetic near-tie cases
+differed in topology in 116 of 300 cases and had six label flips; the dedicated
+128-leaf and 1,200-leaf tests showed no accumulated histogram-statistic drift.
+The implementation
+deliberately retains its exact existing gain comparison and tie-break policy.
+
+### Project-scale benchmark record (reported 2026-08-06)
+
+On the supplied 20,000 by 5,000 representation with `num_leaves=31`, three
+tree fits reported 30 histogram builds with subtraction versus 59 directly.
+Total tree times were 60.58, 58.93, and 58.60 seconds with subtraction
+(median 58.93 seconds), versus 61.17, 60.85, and 59.75 seconds directly
+(median 60.85 seconds, 1.03x). Histogram construction was therefore halved,
+but the total-runtime improvement is modest. The project-scale direct and
+subtraction trees were bit-identical. Each local-layout histogram used about
+9.03 MB and the observed peak was 17 live histograms (about 153 MB). The
+unbounded OPT6 mapping has a worst case of about 271 MB at 31 leaves, with an
+estimated 2.3 GB at 255 leaves; it must be bounded by OPT7 before larger-scale
+use.
+
 ## Objective
 
 Build only one child histogram after a split and derive the other from its
@@ -162,6 +199,7 @@ bytes. Use the same binned data, gradients, rows, features, and configuration.
 - Split ordering and predictions remain deterministic.
 - Direct and subtraction tree paths agree on non-tie fixtures.
 - Construction histograms do not become part of the fitted model.
-- The 31-leaf benchmark shows a material reduction in histogram work and total
-  tree time.
+- The 31-leaf benchmark shows a material reduction in histogram work; total
+  tree time is measured and reported, with the current project-scale gain
+  remaining modest.
 
