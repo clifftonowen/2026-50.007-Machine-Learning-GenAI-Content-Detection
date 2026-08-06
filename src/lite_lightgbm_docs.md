@@ -56,38 +56,50 @@ CSC routine remains a private reference oracle for parity tests. Its specified
 two reported floating-point near-tie split changes are recorded in
 `lite_lightgbm_OPT5.md`.
 
-Optimization 6 is algorithmically complete and has project-scale direct-oracle
-parity. During leaf-wise growth, `fit_tree` retains a histogram only for each
-queued live leaf, directly builds the smaller child (ties go left), and derives
-the other child by subtracting aligned histogram statistics. Empty bins have
-exactly zero statistics; subtraction validates raw residuals before that
-normalization, so material inconsistencies still fail. Construction histograms
-are released before fitting returns and are not part of the trained model. A
-private direct-both-child tree path remains available for parity checks without
-changing the public API.
+Optimization 6 is algorithmically complete and has direct-oracle parity on a
+fixed non-tie fixture: the direct and subtraction paths preserve tree topology
+and match predictions within a tight numerical tolerance. During leaf-wise
+growth, `fit_tree` retains a histogram only for each queued live leaf, directly
+builds the smaller child (ties go left), and derives the other child by
+subtracting aligned histogram statistics. Empty bins have exactly zero
+statistics; subtraction validates raw residuals before that normalization, so
+material inconsistencies still fail. Construction histograms are released
+before fitting returns and are not part of the trained model. A private
+direct-both-child tree path remains available for parity checks without changing
+the public API.
 
-On the supplied 20,000 by 5,000, 31-leaf representation, three subtraction runs
-took 60.58, 58.93, and 58.60 seconds (median 58.93), while direct runs took
+The following OPT6 profile measurements—not OPT7 cache benchmark results—were
+collected on the supplied 20,000 by 5,000, 31-leaf representation. Three
+subtraction runs took 60.58, 58.93, and 58.60 seconds (median 58.93), while direct runs took
 61.17, 60.85, and 59.75 seconds (median 60.85, 1.03x). Histogram builds fell
-from 59 to 30 and the project-scale trees were bit-identical, but the total
-speed gain was modest. Each local-layout histogram used about 9.03 MB, with an
+from 59 to 30. Each local-layout histogram used about 9.03 MB, with an
 observed peak of 17 live histograms (about 153 MB). The unbounded mapping has a
 worst case of about 271 MB at 31 leaves, with an estimated 2.3 GB at 255 leaves;
-OPT7 remains responsible for bounding that memory before larger-scale use.
+OPT7 now bounds retained queued-leaf histogram buffers with a private per-tree
+LRU cache; its configured limit applies to retained cache buffers, not every
+transient child-construction allocation.
 
 Synthetic near-tie cases differed in topology in 116 of 300 cases and had six
 label flips, while the dedicated 128-leaf and 1,200-leaf tests showed no
 accumulated histogram-statistic drift.
 
-Optimizations 7-8 remain implementation plans: bounded histogram caching and
-vectorized split evaluation. Their detailed contracts are in
-`lite_lightgbm_OPT7.md` and `lite_lightgbm_OPT8.md`. Project-scale training
-should wait until the remaining performance-critical sequence is implemented
-and benchmarked.
+Optimization 7 is complete. A private tree-local `OrderedDict` LRU cache now
+bounds retained queued-leaf histogram buffers by their NumPy array bytes. A
+cache hit uses the OPT6 smaller-child direct build plus sibling subtraction; a
+miss, eviction, oversized entry, or zero cache budget builds both children
+directly. Cache residency never affects split eligibility, and the cache is
+discarded at the end of each tree. Focused zero, one-entry, and generous-budget
+checks on a fixed non-tie tree preserved topology and matched predictions within
+a tight numerical tolerance. The 256 MiB default is
+currently a provisional cap, not a target-scale benchmark selection. Repeated
+fits with one fixed cache budget are deterministic, but changing the private
+budget can alter tie-prone trees because direct and subtraction histogram
+paths use different floating-point accumulation orders.
 
-Profiling identifies scalar split evaluation as the next performance priority,
-so OPT8 may be implemented before OPT7; OPT6 is not a logical prerequisite for
-OPT8.
+Optimization 8 remains the next implementation plan: vectorized split
+evaluation. Its detailed contract is in `lite_lightgbm_OPT8.md`.
+
+Profiling identifies scalar split evaluation as the next performance priority.
 
 ## Import and module layout
 

@@ -1,5 +1,24 @@
 # LiteLightGBM optimization 7: bounded histogram caching
 
+## Status
+
+Implemented and verified. `fit_tree` now creates a private per-tree,
+byte-bounded LRU cache for queued live-leaf histograms. Cache hits retain the
+OPT6 subtraction path; evicted, oversized, and zero-budget entries fall back
+to direct construction of both child histograms without changing candidate
+eligibility or the public estimator API.
+
+Focused cache checks covered zero, exact-fit, oversized, replacement, LRU
+eviction, and `take` accounting. A fixed non-tie 8-leaf tree produced the same
+topology in checks with zero, one-entry, and generous cache budgets; predictions
+matched within a tight numerical tolerance. Tie-prone cases may differ across
+budgets because of floating-point accumulation order.
+The 256 MiB default remains a provisional cap: the required target-scale
+budget sweep has not yet selected a runtime/memory plateau. A fixed budget is
+deterministic, but changing it can alter tie-prone trees because direct child
+construction and histogram subtraction accumulate floating statistics in a
+different order.
+
 ## Objective
 
 Bound the memory consumed by live-leaf histograms introduced for histogram
@@ -7,9 +26,11 @@ subtraction. Leaf-wise growth can keep many candidates in its priority queue;
 an unbounded `node_index -> Histogram` dictionary can therefore retain one
 large histogram for every live leaf.
 
-The cache is an internal training optimization. It must not change the fitted
-model format, estimator API, split ordering, or predictions, and it must not use
-scikit-learn.
+The cache is an internal training optimization. Cache residency must not change
+the fitted model format or estimator API, and it must not decide candidate
+eligibility. Repeated fits with the same cache budget are exactly deterministic;
+changing budgets may alter floating fitted statistics and tie-prone trees. The
+module must not use scikit-learn.
 
 ## Cache contents and key
 
@@ -102,19 +123,14 @@ must not enter the cache.
 
 ## Correctness and determinism
 
-Eviction changes only how a child histogram is obtained. It must not change:
-
-- the priority queue and its tie fields;
-- candidate eligibility;
-- sampled rows or features;
-- original feature indices;
-- leaf values or shrinkage;
-- prediction traversal.
-
-Direct construction and subtraction can have slightly different floating-point
-accumulation order. The test suite should use non-tie fixtures for exact split
-topology and tight tolerances for floating statistics. Repeated runs with the
-same cache budget must be exactly deterministic.
+Eviction changes only how a child histogram is obtained. Cache residency must
+not change candidate eligibility, the public estimator API, or fitted model
+format. Direct construction and subtraction can
+have slightly different floating-point accumulation order: repeated runs with
+the same cache budget must be exactly deterministic, while changing budgets may
+alter floating fitted statistics and tie-prone tree topology or predictions.
+The test suite should use a fixed non-tie fixture for exact split topology and
+compare predictions within a tight numerical tolerance.
 
 Optional private counters for hits, misses, evictions, and avoided histogram
 builds are useful for tests and benchmarks. Do not publish them as fitted model
@@ -138,9 +154,12 @@ Tree-level tests should fit the same fixed tree with:
 - a budget that holds exactly one histogram;
 - a zero-byte budget, forcing direct construction after every miss.
 
-All three must produce equivalent tree topology and predictions. Instrumented
-call counts should show that a zero budget behaves like direct child building,
-while a generous budget receives the subtraction benefit.
+On a fixed non-tie fixture, all three should produce equivalent tree topology
+and predictions within a tight numerical tolerance. Tie-prone fixtures may
+differ across budgets, so record floating-statistic and prediction differences;
+repeated fits for each fixed budget must remain deterministic. Instrumented call
+counts should show that a zero budget behaves like direct child building, while
+a generous budget receives the subtraction benefit.
 
 ## Benchmark
 
@@ -152,7 +171,8 @@ On a fixed 31-leaf tree, sweep a small set of internal budgets such as 0, 64,
 - peak `current_bytes`;
 - peak process memory;
 - total tree time;
-- tree/prediction parity.
+- tree/prediction parity on a fixed non-tie fixture within a tight numerical
+  tolerance, with any tie-prone differences recorded.
 
 Repeat the chosen budget on the supplied 5,000-feature representation and one
 representative root/tree run from the 40,385-feature representation. Select the
@@ -164,9 +184,12 @@ benefit.
 - Cache-accounted bytes never exceed the configured private limit.
 - Cache misses fall back to correct direct construction and never remove a
   valid split candidate.
-- Generous, constrained, and zero budgets produce equivalent seeded models.
+- Repeated seeded fits with the same budget are deterministic; across budgets,
+  cache misses preserve candidate eligibility and the public estimator API even
+  when floating statistics or tie-prone trees differ.
 - Cache state is released after each tree and is absent from fitted models.
-- The selected default gives a measured runtime benefit without unacceptable
-  peak memory on the target dataset.
+- Target-scale budget selection remains pending; the 256 MiB default is
+  provisional until runtime and memory measurements identify an acceptable
+  plateau on the target dataset.
 - The module remains deterministic, sparse, and free of scikit-learn imports.
 

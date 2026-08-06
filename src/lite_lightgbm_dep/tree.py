@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import operator
 import heapq
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +20,18 @@ from .core import EPSILON, LiteLightGBMConfig, soft_threshold
 # as one block, so this is only a target for temporary arrays, not a hard
 # restriction on input rows.
 _HISTOGRAM_BLOCK_NNZ = 1_000_000
+
+# The cache retains construction-only histogram buffers for queued candidates.
+# This is intentionally private so the estimator's public configuration and
+# fitted model format remain unchanged.
+# The supplied 20,000 x 5,000 OPT6 profile measured about 9.03 MB per local
+# histogram and 17 live histograms (about 153 MB); no target budget sweep
+# justifies a smaller default, so retain this conservative provisional 256 MiB
+# private cap pending a target-scale OPT7 budget measurement. Because direct-
+# child aggregation and parent subtraction use different floating-point
+# accumulation orders, changing this private budget can change tie-prone trees;
+# repeated fits with one fixed budget remain deterministic.
+_HISTOGRAM_CACHE_MAX_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +207,79 @@ class Histogram:
     hessian_sums: np.ndarray
     counts: np.ndarray
     layout: HistogramLayout | None = None
+
+
+class _HistogramCache:
+    """Private byte-bounded LRU cache for tree-local histograms."""
+
+    def __init__(self, max_bytes: int):
+        if isinstance(max_bytes, (bool, np.bool_)):
+            raise ValueError("histogram cache byte budget must be a non-negative integer")
+        try:
+            normalized_max_bytes = operator.index(max_bytes)
+        except TypeError as exc:
+            raise ValueError(
+                "histogram cache byte budget must be a non-negative integer"
+            ) from exc
+        if normalized_max_bytes < 0:
+            raise ValueError(
+                "histogram cache byte budget must be a non-negative integer"
+            )
+        self._max_bytes = int(normalized_max_bytes)
+        self._entries: OrderedDict[int, tuple[Histogram, int]] = OrderedDict()
+        self._current_bytes = 0
+
+    @staticmethod
+    def _entry_bytes(histogram: Histogram) -> int:
+        """Return the Python-int size of the retained NumPy buffers."""
+        return int(
+            int(histogram.gradient_sums.nbytes)
+            + int(histogram.hessian_sums.nbytes)
+            + int(histogram.counts.nbytes)
+        )
+
+    @property
+    def current_bytes(self) -> int:
+        """Return the total bytes charged to retained histogram buffers."""
+        return int(self._current_bytes)
+
+    def put(self, node_index: int, histogram: Histogram) -> bool:
+        """Retain ``histogram`` if it fits, evicting least-recent entries."""
+        try:
+            key = operator.index(node_index)
+        except TypeError as exc:
+            raise ValueError("histogram cache node index must be an integer") from exc
+        entry_bytes = self._entry_bytes(histogram)
+
+        # Replacing a key first releases its old charge, even when the new
+        # histogram is too large to retain.
+        old_entry = self._entries.pop(key, None)
+        if old_entry is not None:
+            self._current_bytes -= int(old_entry[1])
+
+        if entry_bytes > self._max_bytes:
+            return False
+
+        while self._entries and self._current_bytes + entry_bytes > self._max_bytes:
+            _, (_, evicted_bytes) = self._entries.popitem(last=False)
+            self._current_bytes -= int(evicted_bytes)
+
+        self._entries[key] = (histogram, entry_bytes)
+        self._current_bytes += entry_bytes
+        return True
+
+    def take(self, node_index: int) -> Histogram | None:
+        """Remove and return a cached histogram, or ``None`` on a miss."""
+        try:
+            key = operator.index(node_index)
+        except TypeError as exc:
+            raise ValueError("histogram cache node index must be an integer") from exc
+        entry = self._entries.pop(key, None)
+        if entry is None:
+            return None
+        histogram, entry_bytes = entry
+        self._current_bytes -= int(entry_bytes)
+        return histogram
 
 
 def _subtract_histograms(
@@ -1762,6 +1849,7 @@ def _fit_tree(
     config: LiteLightGBMConfig,
     *,
     use_histogram_subtraction: bool,
+    _histogram_cache_bytes: int | None = None,
 ) -> DecisionTree:
     """Fit one tree, optionally using histogram subtraction for child leaves."""
     # Keep the tree builder's validation local to the arguments it consumes.
@@ -1908,6 +1996,25 @@ def _fit_tree(
         reg_lambda=float(reg_lambda),
     )
 
+    if _histogram_cache_bytes is None:
+        cache_bytes = _HISTOGRAM_CACHE_MAX_BYTES
+    else:
+        if isinstance(_histogram_cache_bytes, (bool, np.bool_)):
+            raise ValueError(
+                "histogram cache byte budget must be a non-negative integer"
+            )
+        try:
+            cache_bytes = operator.index(_histogram_cache_bytes)
+        except TypeError as exc:
+            raise ValueError(
+                "histogram cache byte budget must be a non-negative integer"
+            ) from exc
+        if cache_bytes < 0:
+            raise ValueError(
+                "histogram cache byte budget must be a non-negative integer"
+            )
+        cache_bytes = int(cache_bytes)
+
     root_gradient = float(np.sum(gradient_values[rows], dtype=np.float64))
     root_hessian = float(np.sum(hessian_values[rows], dtype=np.float64))
     root_denominator = root_hessian + reg_lambda
@@ -1934,10 +2041,11 @@ def _fit_tree(
     # tie-break.  The SplitInfo object is never compared because node indices
     # are unique for every live candidate.
     queue: list[tuple[float, int, int, int, SplitInfo]] = []
-    # Construction-only state: every queued candidate has exactly one
-    # histogram retained here, and entries are removed as soon as candidates
-    # are popped.  Histograms are never attached to the fitted tree nodes.
-    live_histograms: dict[int, Histogram] = {}
+    # Construction-only state: every queued candidate may have one histogram
+    # retained here, and entries are removed as soon as candidates are popped.
+    # Histograms are never attached to the fitted tree nodes.  The direct
+    # oracle intentionally skips retention because it does not use subtraction.
+    histogram_cache = _HistogramCache(cache_bytes) if use_histogram_subtraction else None
     root_histogram = _build_histogram_validated(
         data=context.data,
         rows=rows,
@@ -1980,19 +2088,19 @@ def _fit_tree(
                     root_split,
                 ),
             )
-            live_histograms[0] = root_histogram
+            if histogram_cache is not None:
+                histogram_cache.put(0, root_histogram)
     # If the root is terminal its histogram is no longer needed.  When it is
-    # queued, the mapping above is the sole remaining owner after this scope.
+    # queued, the cache above is the sole remaining owner after this scope.
     del root_histogram
 
     while queue and leaves < num_leaves:
         _, _, _, node_index, split = heapq.heappop(queue)
-        try:
-            parent_histogram = live_histograms.pop(node_index)
-        except KeyError as exc:
-            raise RuntimeError(
-                f"missing live histogram for queued split node {node_index}"
-            ) from exc
+        parent_histogram = (
+            histogram_cache.take(node_index)
+            if histogram_cache is not None
+            else None
+        )
         current_rows = node_rows[node_index]
         if current_rows is None:
             # Defensive guard for malformed/stale candidates; normal growth
@@ -2066,7 +2174,7 @@ def _fit_tree(
             del parent_histogram
             continue
 
-        if use_histogram_subtraction:
+        if use_histogram_subtraction and parent_histogram is not None:
             # Build only the smaller child directly (ties deterministically
             # choose the left child), then derive the sibling from the popped
             # parent.  The private oracle below retains the direct-both-child
@@ -2104,8 +2212,8 @@ def _fit_tree(
                     parent_histogram, right_histogram
                 )
         else:
-            # Private direct-both-child oracle used to compare complete tree
-            # growth against subtraction while sharing all queue semantics.
+            # Cache misses and the private direct-both-child oracle both use
+            # the established direct construction path.
             left_histogram = _build_histogram_validated(
                 data=context.data,
                 rows=left_rows,
@@ -2161,7 +2269,8 @@ def _fit_tree(
                     left_split,
                 ),
             )
-            live_histograms[left_index] = left_histogram
+            if histogram_cache is not None:
+                histogram_cache.put(left_index, left_histogram)
 
         right_split = _find_best_split_validated(
             gradients=right_histogram.gradient_sums,
@@ -2192,12 +2301,12 @@ def _fit_tree(
                     right_split,
                 ),
             )
-            live_histograms[right_index] = right_histogram
+            if histogram_cache is not None:
+                histogram_cache.put(right_index, right_histogram)
         # Any histogram not retained for a queued candidate can be released at
-        # the end of this iteration.  ``live_histograms`` owns retained ones.
+        # the end of this iteration.  ``histogram_cache`` owns retained ones.
         del left_histogram, right_histogram
 
-    live_histograms.clear()
     return DecisionTree(nodes=nodes, feature_indices=features)
 
 

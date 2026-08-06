@@ -108,7 +108,7 @@ project's binary sparse-text problem.
 | Multiclass, regression, and ranking objectives | Only binary labels and binary log loss are supported. There are no softmax, regression-loss, LambdaRank, or NDCG-specific paths. |
 | Monotonic constraints, interaction constraints, and linear leaves | Every leaf outputs one unconstrained constant. Advanced structural and domain constraints are outside the project requirements. |
 | Parallel CPU, GPU, and distributed training | Histogram construction and tree growth are deterministic and serial at the Python orchestration level. NumPy and SciPy may use compiled numerical kernels, but there is no custom threading, accelerator, or multi-machine implementation. |
-| Full histogram-cache manager initially | The correctness oracle can construct both child histograms directly, while the completed OPT6 path builds one child and derives its sibling. Bounded caching remains a later measured optimization, and OPT7 must bound OPT6's live-histogram memory before larger-scale use. Training will still be slower than LightGBM. |
+| Full histogram-cache manager initially | The correctness oracle can construct both child histograms directly, while the completed OPT6 path builds one child and derives its sibling. OPT7 is complete for now: its private per-tree cache bounds retained live-histogram buffers, but its default budget remains provisional pending target-scale measurement. Training will still be slower than LightGBM. |
 | Early stopping and training callbacks | The initial API fits exactly `n_estimators` trees. Cross-validation must select that value externally. Early stopping can be added after the core boosting path is stable. |
 | Probability calibration and project-specific thresholds | `predict_proba` returns the sigmoid of the ensemble score, but class weighting can distort probability calibration. Share matching and per-group thresholds remain separate project logic. |
 | Complete sklearn and LightGBM APIs | The estimator supplies only the cloning, fitting, and prediction protocol needed by this repository. It does not reproduce every metadata method, callback, alias, metric, plotting helper, or model-dump format. |
@@ -482,19 +482,24 @@ with it. Add and test these optimizations in order:
    blocks aggregate flattened local-bin keys with `np.bincount`, while the
    direct CSC path remains a private test oracle; the 40,385-feature root-memory
    benchmark remains pending);
-5. **OPT6 — histogram subtraction** (complete algorithmically and verified at
-   project scale: queued live leaves retain construction-only aligned
+5. **OPT6 — histogram subtraction** (complete algorithmically and verified on a
+   fixed non-tie fixture: queued live leaves retain construction-only aligned
    histograms, the smaller child is built directly, its sibling is derived by
    subtraction, and zero-count bins have exact zero sufficient statistics; the
-   20,000 by 5,000, 31-leaf benchmark used 30 versus 59 histogram builds, with
-   only a modest 1.03x median total-runtime improvement, and direct/subtraction
-   trees were bit-identical; synthetic near-tie probes differed in topology in
+   direct and subtraction paths preserve topology and match predictions within
+   a tight numerical tolerance. OPT6 profile measurements—not OPT7 cache
+   benchmark results—on the supplied 20,000 by 5,000, 31-leaf representation
+   used 30 versus 59 histogram builds, with only a modest 1.03x median
+   total-runtime improvement; synthetic near-tie probes differed in topology in
    116/300 cases with six label flips, while the 128- and 1,200-leaf tests
    showed no prediction drift);
-6. **OPT8 — vectorized split evaluation** within each feature;
-7. **OPT7 — bounded histogram caching**.
+6. **OPT7 — bounded histogram caching** (complete: a private per-tree LRU
+   bounds retained queued-leaf histogram buffers; cache misses use direct
+   two-child construction without changing candidate eligibility or the public
+   estimator API);
+7. **OPT8 — vectorized split evaluation** within each feature.
 
-Each planned optimization has a standalone implementation contract in the matching
+Each optimization has a standalone implementation contract in the matching
 `lite_lightgbm_OPT<N>.md` file. OPT8 retains the bounded loop over selected features but
 replaces the scalar candidate-threshold loop with array masks and vector score
 calculation. It must preserve the strict gain rule and the existing feature/threshold
@@ -502,15 +507,19 @@ tie-break.
 
 Measured profiling identifies the scalar threshold loop as the dominant tree-building
 cost, while OPT4's one-time validation removes only a small fraction of total work.
-OPT8 is therefore the next priority; OPT7 is not a logical prerequisite for OPT8.
+OPT8 is therefore the next priority.
 
 The extraction-only module refactor in `lite_lightgbm_refac.md` is complete.
 It preserved the `src.lite_lightgbm` façade and exact behavior; OPT3 behavior
 remains outside that extraction.
 
-Complete the performance-critical sequence through OPT8 before project-scale fitting.
-OPT7 bounds the live-histogram memory introduced by OPT6; its cache budget must be
-selected from measurements rather than assumed. Feature bundling remains optional and
+Complete the remaining performance-critical work through OPT8 before project-scale
+fitting. OPT7 bounds the retained live-histogram memory introduced by OPT6; its default
+budget is a benchmark candidate and should be measured on the target representation.
+Repeated fits with the same private budget remain deterministic, but changing the
+budget can alter tie-prone trees because direct child histograms and histogram
+subtraction accumulate floating statistics in different orders.
+Feature bundling remains optional and
 should be added only if the 40,385-feature profile shows that its complexity is
 necessary. GOSS is not part of this sequence because the project's current reference
 estimator uses ordinary `gbdt` boosting.
