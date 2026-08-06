@@ -40,6 +40,9 @@ from .lite_lightgbm_dep.tree import (
     partition_rows,
     fit_tree,
     predict_tree_raw,
+    _fit_tree,
+    _predict_tree_raw_validated,
+    _validate_tree_storage,
 )
 
 
@@ -488,6 +491,7 @@ class LiteLightGBM:
         # path above has succeeded.
         mapper = fit_bin_mapper(X, config)
         binned = transform_bins(X, mapper)
+        tree_storage = _validate_tree_storage(binned, n_samples, n_features)
         active_features = _active_feature_indices(
             binned,
             normalized_integers["min_child_samples"],
@@ -543,15 +547,24 @@ class LiteLightGBM:
             gradients, hessians = binary_gradients_hessians(
                 raw_scores, labels_float, effective_weights
             )
-            tree = fit_tree(
+            tree = _fit_tree(
                 binned,
                 gradients,
                 hessians,
                 row_indices,
                 feature_indices,
                 config,
+                use_histogram_subtraction=True,
+                _validated_storage=tree_storage,
             )
-            tree_output = predict_tree_raw(tree, binned)
+            tree_output = _predict_tree_raw_validated(
+                tree,
+                n_samples=n_samples,
+                n_features=n_features,
+                csc=tree_storage[1],
+                n_bins=tree_storage[3],
+                defaults=tree_storage[4],
+            )
             if not np.isfinite(tree_output).all():
                 raise ValueError("tree predictions must remain finite")
             raw_scores = raw_scores + learning_rate * tree_output
@@ -658,6 +671,7 @@ class LiteLightGBM:
         # mapper checks ensure the learned representation is compatible with
         # this batch before any tree traversal begins.
         data = transform_bins(X, self.mapper_)
+        tree_storage = _validate_tree_storage(data, n_samples, n_features)
         try:
             init_score = float(self.init_score_)
             learning_rate = float(self.learning_rate_)
@@ -674,7 +688,15 @@ class LiteLightGBM:
         for tree in trees:
             try:
                 tree_output = np.asarray(
-                    predict_tree_raw(tree, data), dtype=np.float64
+                    _predict_tree_raw_validated(
+                        tree,
+                        n_samples=n_samples,
+                        n_features=n_features,
+                        csc=tree_storage[1],
+                        n_bins=tree_storage[3],
+                        defaults=tree_storage[4],
+                    ),
+                    dtype=np.float64,
                 )
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError("tree predictions must be finite numeric values") from exc

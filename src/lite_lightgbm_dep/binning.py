@@ -183,15 +183,42 @@ def fit_bin_mapper(X: Matrix, config: LiteLightGBMConfig) -> BinMapper:
         if not np.isfinite(matrix).all():
             raise ValueError("X must contain only finite values")
 
-    try:
-        max_bin = int(config.max_bin)
-        min_data_in_bin = int(config.min_data_in_bin)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("max_bin and min_data_in_bin must be integers") from exc
-    if max_bin < 1:
-        raise ValueError("max_bin must be positive")
-    if min_data_in_bin < 1:
-        raise ValueError("min_data_in_bin must be positive")
+    # Match the estimator's scalar validation without silently truncating
+    # fractional values.  Direct mapper calls retain their historical lower
+    # bound of one for both fields.
+    normalized_config: dict[str, int] = {}
+    for name, value in (
+        ("max_bin", config.max_bin),
+        ("min_data_in_bin", config.min_data_in_bin),
+    ):
+        try:
+            raw_value = np.asarray(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be an integer scalar") from exc
+        if raw_value.ndim != 0:
+            raise ValueError(f"{name} must be an integer scalar")
+        dtype = raw_value.dtype
+        if (
+            np.issubdtype(dtype, np.bool_)
+            or not np.issubdtype(dtype, np.number)
+            or np.issubdtype(dtype, np.complexfloating)
+        ):
+            raise ValueError(f"{name} must be an integer scalar")
+        try:
+            numeric_value = float(raw_value.item())
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be an integer scalar") from exc
+        if not np.isfinite(numeric_value) or numeric_value != np.trunc(
+            numeric_value
+        ):
+            raise ValueError(f"{name} must be an integer scalar")
+        normalized_value = int(numeric_value)
+        if normalized_value < 1:
+            raise ValueError(f"{name} must be positive")
+        normalized_config[name] = normalized_value
+
+    max_bin = normalized_config["max_bin"]
+    min_data_in_bin = normalized_config["min_data_in_bin"]
 
     # A feature's values are represented by sorted distinct values and integer
     # occurrence counts.  Sparse matrices need implicit zero occurrences added

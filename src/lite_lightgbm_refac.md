@@ -5,7 +5,9 @@
 **Complete.** The shared core, binning, and tree definitions have been extracted
 into the three implementation modules under `src/lite_lightgbm_dep/` described below. `src.lite_lightgbm`
 remains the stable public façade and preserves the documented re-exports and
-estimator behavior.
+estimator behavior. The Stage 1 regression foundation is persistent in
+`tests/test_lite_lightgbm_refactor.py` and is run with the unittest discovery
+command specified below.
 
 ## Purpose
 

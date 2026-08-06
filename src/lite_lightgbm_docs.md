@@ -42,8 +42,9 @@ original feature IDs in `active_features_`. Each tree then allocates histograms
 only for its sampled active features, while stored split IDs and feature
 importances continue to use the original input-column numbering.
 
-Optimization 4 is complete. Tree fitting validates shared immutable input once
-and then uses private trusted histogram, split-search, and partition kernels;
+Optimization 4 is complete. Estimator fitting and prediction validate each
+internally produced binned dataset once per operation, then reuse its normalized
+storage across all trees. Tree growth and traversal use private trusted kernels;
 the public development helpers remain fully validating checked entry points.
 
 Optimization 5 is implemented and verified on the supplied 5,000-feature
@@ -62,8 +63,12 @@ and match predictions within a tight numerical tolerance. During leaf-wise
 growth, `fit_tree` retains a histogram only for each queued live leaf, directly
 builds the smaller child (ties go left), and derives the other child by
 subtracting aligned histogram statistics. Empty bins have exactly zero
-statistics; subtraction validates raw residuals before that normalization, so
-material inconsistencies still fail. Construction histograms are released
+statistics; subtraction validates raw residuals against a scale-aware
+`128 * eps` bound before that normalization, so material inconsistencies still
+fail. Builder-created histograms carry optional finite absolute accumulation
+scales to account for default-bin error from large or cancellation-heavy leaf
+totals; derived histograms conservatively propagate both operand scales, while
+legacy hand-built four-field histograms retain the per-bin fallback. Construction histograms are released
 before fitting returns and are not part of the trained model. A private
 direct-both-child tree path remains available for parity checks without changing
 the public API.
@@ -83,6 +88,15 @@ Synthetic near-tie cases differed in topology in 116 of 300 cases and had six
 label flips, while the dedicated 128-leaf and 1,200-leaf tests showed no
 accumulated histogram-statistic drift.
 
+An independently reproduced first-tree diagnostic on the supplied 20,000 x 5,000
+CSR representation (`num_leaves=149`, `colsample_bytree=0.5198042692950159`,
+`min_child_samples=7`, `reg_alpha=0.34104824737458306`,
+`reg_lambda=0.13010318597055903`, `learning_rate=0.034494`, balanced weights,
+`random_state=42`) completed all 297 nodes and 149 leaves with 138 subtraction
+operations. Exactly one zero-count gradient residual measured `117.75 * eps`
+at the unit scale floor and was rescued by the `128 * eps` guard. This is
+measured first-tree evidence, not a full-ensemble runtime estimate.
+
 Optimization 7 is complete. A private tree-local `OrderedDict` LRU cache now
 bounds retained queued-leaf histogram buffers by their NumPy array bytes. A
 cache hit uses the OPT6 smaller-child direct build plus sibling subtraction; a
@@ -96,10 +110,21 @@ fits with one fixed cache budget are deterministic, but changing the private
 budget can alter tie-prone trees because direct and subtraction histogram
 paths use different floating-point accumulation orders.
 
-Optimization 8 remains the next implementation plan: vectorized split
-evaluation. Its detailed contract is in `lite_lightgbm_OPT8.md`.
+Optimization 8 implementation and correctness are complete. Its trusted
+`_find_best_split_validated(...)` kernel batches the sole threshold of all
+two-bin features and evaluates wider segments with NumPy vectors; a private
+`_find_best_split_scalar_validated(...)` helper retains the pre-OPT8 threshold
+loop as a correctness oracle for focused parity checks. Direct-kernel
+low-bin/multi-bin benchmark evidence is recorded in
+`lite_lightgbm_OPT8.md`; full-tree and target-scale timing remain unmeasured.
 
-Profiling identifies scalar split evaluation as the next performance priority.
+A persistent unittest regression suite using the standard library, NumPy, and
+SciPy is available at `tests/test_lite_lightgbm_refactor.py`; run it with
+`uv run python -m unittest discover -s tests -p "test_lite_lightgbm*.py"` from
+the project root. Runtime import checks require the project virtual environment
+and its dependencies. The focused split-search regression is
+`tests/test_lite_lightgbm_split_search.py`; no full-tree split-search benchmark
+is claimed here.
 
 ## Import and module layout
 
@@ -318,7 +343,9 @@ Contains three flattened arrays using `BinMapper.bin_offsets`:
 
 - `gradient_sums`;
 - `hessian_sums`; and
-- exact `counts`.
+- exact `counts`;
+- optional `gradient_scale` and `hessian_scale` absolute accumulation metadata
+  used only to validate histogram-subtraction residuals.
 
 Each selected feature has its own histogram segment, and every row contributes once to
 that segment, including through the feature's implicit default bin.
@@ -328,6 +355,9 @@ this layout. It contains the sorted original feature IDs selected for the tree, 
 bin counts and default bins, local prefix offsets, and an original-feature-to-local-slot
 lookup. The layout is immutable and shared by every histogram in that tree. Empty
 layouts have the single offset `[0]` and produce root-only trees.
+If `active_features_` is empty, fitting intentionally completes with these
+root-only trees and a constant predictor; inspect that learned attribute when
+you need to distinguish this valid no-split outcome from a feature-rich fit.
 
 ### `SplitInfo`
 
@@ -390,6 +420,10 @@ feasibility rules, desired-rank distances, stable lower-boundary tie-break, and 
 zero semantics are preserved. Sparse matrices are canonicalized so equivalent dense,
 CSR, and CSC representations learn the same deterministic mapper.
 
+Direct calls require `config.max_bin` and `config.min_data_in_bin` to be finite,
+real, integer-valued scalar numbers (at least `1`); booleans, fractions, complex or
+non-numeric values, non-finite values, and non-scalar arrays are rejected.
+
 ### `transform_bins(X, mapper)`
 
 Maps a matrix through a fitted `BinMapper` and returns encoded CSR and CSC views. Input
@@ -410,11 +444,16 @@ Direct calls require finite, row-aligned gradient and Hessian arrays.
 Uses prefix sums to evaluate boundaries between adjacent bins. A valid split must meet
 minimum child count, minimum child Hessian, gain, depth, and leaf-count constraints.
 Exact gain ties prefer the lower feature index and then the lower threshold-bin index.
+For a feature with `n_bins[j]` bins, threshold bins are boundaries in the inclusive
+range `0 .. n_bins[j] - 2`; the terminal bin (`n_bins[j] - 1`) is not a split boundary.
+Features with one bin therefore have no valid split threshold.
 
 ### `partition_rows(data, row_indices, split)`
 
 Returns disjoint left and right row-index arrays. Bins at or below the threshold route
-left; larger bins route right. Input ordering is preserved within both results.
+left; larger bins route right. Input ordering is preserved within both results. The
+threshold validation follows the `find_best_split` range above and rejects terminal-bin
+thresholds, including every threshold for a one-bin feature.
 
 ### `fit_tree(...)`
 
@@ -428,6 +467,12 @@ form.
 ### `predict_tree_raw(tree, data)`
 
 Traverses one tree and returns the unscaled terminal-node correction for every row.
+Direct calls validate the complete mapper, sparse storage, and tree graph. The
+estimator's multi-tree prediction path performs the same storage validation once
+for the batch and still validates every stored tree graph before traversal.
+Fitted internal nodes use the same split-boundary validation as `partition_rows`:
+threshold bins must be `0 .. n_bins[feature] - 2`, so terminal-bin and one-bin
+thresholds are rejected.
 
 ## Numerical safeguards
 

@@ -9,9 +9,13 @@ the smaller child (breaking equal sizes toward the left), and derives the
 sibling by layout-safe subtraction. Derived counts are exact. Every
 zero-count bin is normalized to exactly zero gradient and Hessian statistics,
 but only after subtraction validates that its raw residual is within the
-documented machine-precision tolerance; material positive or negative
-inconsistencies still raise. Histograms are released during construction and
-are never retained by `DecisionTree`.
+documented scale-aware `128 * eps` tolerance; material positive or negative
+inconsistencies still raise. Builder-created histograms carry optional finite
+absolute accumulation scales (the sum of per-row absolute contributions), so
+default-bin residuals are bounded by operand histories rather than signed leaf
+totals. Derived histograms conservatively propagate both operand scales;
+four-field hand-built histograms retain the per-bin fallback. Histograms are
+released during construction and are never retained by `DecisionTree`.
 
 The private `_fit_tree(..., use_histogram_subtraction=False)` path preserves a
 direct-both-child oracle for regression checks without changing the public
@@ -22,6 +26,15 @@ differed in topology in 116 of 300 cases and had six label flips; the dedicated
 128-leaf and 1,200-leaf tests showed no accumulated histogram-statistic drift.
 The implementation
 deliberately retains its exact existing gain comparison and tie-break policy.
+
+An independently reproduced first-tree diagnostic on the supplied 20,000 x 5,000
+CSR representation (`num_leaves=149`, `colsample_bytree=0.5198042692950159`,
+`min_child_samples=7`, `reg_alpha=0.34104824737458306`,
+`reg_lambda=0.13010318597055903`, `learning_rate=0.034494`, balanced weights,
+`random_state=42`) completed all 297 nodes and 149 leaves with 138 subtraction
+operations. Exactly one zero-count gradient residual required the wider bound:
+it measured `117.75 * eps` with a unit scale floor. This is measured first-tree
+evidence for the subtraction guard, not a full-ensemble runtime estimate.
 
 ### Project-scale benchmark record (reported 2026-08-06)
 
@@ -129,10 +142,14 @@ and must raise rather than be clipped.
 
 Gradients may legitimately be negative, so never clamp them. Hessians are
 non-negative, but roundoff can produce a very small negative difference when
-the directly built child nearly equals the parent. Use a scale-aware tolerance,
-for example a small multiple of machine epsilon based on the corresponding
-parent and child magnitudes. Clamp only Hessians in `[-tolerance, 0)` to zero;
-raise for a more negative result. Document the chosen tolerance in code.
+the directly built child nearly equals the parent. For zero-count bins, use a
+scale-aware tolerance based on the corresponding parent/child magnitudes plus
+their optional absolute accumulation scales, with a unit floor; this
+implementation uses `128 * eps`. Clamp only Hessians in `[-tolerance, 0)` to
+zero; raise for a more negative result. For populated bins, retain the local
+operand scale for the negativity check so a large default-bin history cannot
+mask a materially inconsistent parent/child relationship. Document the chosen
+tolerance in code.
 
 After subtraction, verify in tests rather than the production hot path that:
 

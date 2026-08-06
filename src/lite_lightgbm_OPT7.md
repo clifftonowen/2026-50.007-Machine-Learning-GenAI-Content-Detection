@@ -49,7 +49,9 @@ histogram.gradient_sums.nbytes
 
 Do not use `sys.getsizeof` for the main accounting because it does not represent
 NumPy buffer size reliably. Layout metadata is shared per tree and does not need
-to be charged to every entry.
+to be charged to every entry. The optional scalar accumulation-scale metadata
+used by OPT6 subtraction is likewise construction-only and has no material
+per-entry buffer charge.
 
 ## Internal cache type
 

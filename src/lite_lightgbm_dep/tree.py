@@ -33,6 +33,14 @@ _HISTOGRAM_BLOCK_NNZ = 1_000_000
 # repeated fits with one fixed budget remain deterministic.
 _HISTOGRAM_CACHE_MAX_BYTES = 256 * 1024 * 1024
 
+# Empty-bin residuals and harmless negative Hessian roundoff are bounded by a
+# scale-aware multiple of float64 machine epsilon.  The 128-epsilon bound is
+# intentionally conservative: it multiplies per-bin magnitudes or the
+# absolute accumulation scales carried by builder-created histograms.  An
+# independently reproduced 149-leaf first-tree diagnostic needed 117.75
+# epsilon for one zero-count gradient residual.
+_HISTOGRAM_SUBTRACTION_EPSILON_MULTIPLIER = 128.0
+
 
 @dataclass(frozen=True, slots=True)
 class HistogramLayout:
@@ -201,12 +209,63 @@ def _validate_layout_for_mapper(
 
 @dataclass(slots=True)
 class Histogram:
-    """Flattened per-bin gradient, Hessian, and exact-count statistics."""
+    """Flattened per-bin statistics and construction-scale metadata.
+
+    ``gradient_scale`` and ``hessian_scale`` are optional absolute
+    accumulation scales (the sum of per-row absolute contributions used to
+    build the histogram).  They are construction-only metadata used to bound
+    roundoff when an implicit default bin is recovered by subtraction.  The
+    fields are optional so four-field, hand-built histograms retain the
+    historical fallback validation behavior.
+    """
 
     gradient_sums: np.ndarray
     hessian_sums: np.ndarray
     counts: np.ndarray
     layout: HistogramLayout | None = None
+    gradient_scale: float | None = None
+    hessian_scale: float | None = None
+
+
+def _validate_histogram_scale(value: Any, name: str) -> float | None:
+    """Normalize optional histogram accumulation metadata.
+
+    Hand-built histograms may omit scale metadata, in which case subtraction
+    falls back to the pre-OPT6 per-bin scale.  Supplied metadata is checked
+    before it can widen a residual tolerance: it must be one finite,
+    non-negative real scalar, not an array, bool, complex value, or NaN/inf.
+    """
+    if value is None:
+        return None
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative scalar") from exc
+    if raw.ndim != 0:
+        raise ValueError(f"{name} must be a finite non-negative scalar")
+    dtype = raw.dtype
+    if (
+        np.issubdtype(dtype, np.bool_)
+        or not np.issubdtype(dtype, np.number)
+        or np.issubdtype(dtype, np.complexfloating)
+    ):
+        raise ValueError(f"{name} must be a finite non-negative scalar")
+    try:
+        normalized = float(raw.item())
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative scalar") from exc
+    if not np.isfinite(normalized) or normalized < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative scalar")
+    return normalized
+
+
+def _histogram_accumulation_scale(values: np.ndarray, name: str) -> float:
+    """Return a finite absolute summation scale for one row contribution array."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        scale = float(np.sum(np.abs(values), dtype=np.float64))
+    if not np.isfinite(scale) or scale < 0.0:
+        raise ValueError(f"histogram {name} accumulation scale is not finite")
+    return scale
 
 
 class _HistogramCache:
@@ -292,14 +351,51 @@ def _subtract_histograms(
     point at the exact same immutable layout and contain equally shaped
     flattened arrays.  Floating statistics are widened before subtraction;
     exact row counts use signed ``int64`` arithmetic.  Empty-bin residuals are
-    checked against scale-aware ``64 * eps`` bounds, while materially negative
+    checked against scale-aware ``128 * eps`` bounds, while materially negative
     Hessian residuals in populated bins are rejected as a broken parent/child
-    relationship.
+    relationship.  Histograms produced by the builders carry optional
+    absolute accumulation scales; when both operands have one, their sum is
+    included in the empty-bin tolerance and propagated to the derived parent.
+    Four-field hand-built histograms retain the historical per-bin fallback.
     """
     if not isinstance(parent, Histogram) or not isinstance(child, Histogram):
         raise ValueError("histogram subtraction requires Histogram operands")
     if parent.layout is not child.layout:
         raise ValueError("histograms must share the exact same layout")
+
+    parent_gradient_scale = _validate_histogram_scale(
+        getattr(parent, "gradient_scale", None), "parent gradient_scale"
+    )
+    child_gradient_scale = _validate_histogram_scale(
+        getattr(child, "gradient_scale", None), "child gradient_scale"
+    )
+    parent_hessian_scale = _validate_histogram_scale(
+        getattr(parent, "hessian_scale", None), "parent hessian_scale"
+    )
+    child_hessian_scale = _validate_histogram_scale(
+        getattr(child, "hessian_scale", None), "child hessian_scale"
+    )
+
+    # Combining scales rather than recomputing one from the signed derived
+    # total is important when large positive and negative gradients cancel.
+    # If either operand is a legacy hand-built histogram, keep the established
+    # local-bin fallback instead of pretending the missing scale is zero.
+    derived_gradient_scale: float | None = None
+    if parent_gradient_scale is not None and child_gradient_scale is not None:
+        with np.errstate(over="ignore", invalid="ignore"):
+            candidate_gradient_scale = (
+                parent_gradient_scale + child_gradient_scale
+            )
+        if not np.isfinite(candidate_gradient_scale):
+            raise ValueError("histogram gradient accumulation scale is not finite")
+        derived_gradient_scale = float(candidate_gradient_scale)
+    derived_hessian_scale: float | None = None
+    if parent_hessian_scale is not None and child_hessian_scale is not None:
+        with np.errstate(over="ignore", invalid="ignore"):
+            candidate_hessian_scale = parent_hessian_scale + child_hessian_scale
+        if not np.isfinite(candidate_hessian_scale):
+            raise ValueError("histogram Hessian accumulation scale is not finite")
+        derived_hessian_scale = float(candidate_hessian_scale)
 
     try:
         parent_gradients = np.asarray(parent.gradient_sums)
@@ -403,18 +499,33 @@ def _subtract_histograms(
     gradient_scale = np.maximum(
         np.abs(parent_gradient_values) + np.abs(child_gradient_values), 1.0
     )
+    if derived_gradient_scale is not None:
+        gradient_scale = np.maximum(gradient_scale, derived_gradient_scale)
     gradient_tolerance = (
-        64.0
+        _HISTOGRAM_SUBTRACTION_EPSILON_MULTIPLIER
         * np.finfo(np.float64).eps
         * gradient_scale
     )
-    hessian_scale = np.maximum(
+    hessian_local_scale = np.maximum(
         np.abs(parent_hessian_values) + np.abs(child_hessian_values), 1.0
     )
+    hessian_scale = hessian_local_scale.copy()
+    if derived_hessian_scale is not None:
+        hessian_scale = np.maximum(hessian_scale, derived_hessian_scale)
     hessian_tolerance = (
-        64.0
+        _HISTOGRAM_SUBTRACTION_EPSILON_MULTIPLIER
         * np.finfo(np.float64).eps
         * hessian_scale
+    )
+    # Hessian sums represent non-negative curvature in ordinary objectives.
+    # Keep populated-bin negativity tied to the local operands even when a
+    # large carried scale is needed for an empty default-bin residual; this
+    # prevents metadata from turning a materially inconsistent ``parent <
+    # child`` relationship into a harmless negative clamp.
+    hessian_local_tolerance = (
+        _HISTOGRAM_SUBTRACTION_EPSILON_MULTIPLIER
+        * np.finfo(np.float64).eps
+        * hessian_local_scale
     )
 
     if np.any(
@@ -441,11 +552,11 @@ def _subtract_histograms(
     derived_hessians[empty_bins] = 0.0
 
     small_negative = (derived_hessians < 0.0) & (
-        derived_hessians >= -hessian_tolerance
+        derived_hessians >= -hessian_local_tolerance
     )
     if np.any(small_negative):
         derived_hessians[small_negative] = 0.0
-    if np.any(derived_hessians < -hessian_tolerance):
+    if np.any(derived_hessians < -hessian_local_tolerance):
         raise ValueError("histogram subtraction produced materially negative Hessians")
 
     return Histogram(
@@ -453,6 +564,8 @@ def _subtract_histograms(
         hessian_sums=derived_hessians,
         counts=derived_counts,
         layout=parent.layout,
+        gradient_scale=derived_gradient_scale,
+        hessian_scale=derived_hessian_scale,
     )
 
 
@@ -968,12 +1081,20 @@ def _build_histogram_direct(
     gradient_sums = np.zeros(total_bins, dtype=np.float64)
     hessian_sums = np.zeros(total_bins, dtype=np.float64)
     counts = np.zeros(total_bins, dtype=np.int64)
+    gradient_scale = _histogram_accumulation_scale(
+        gradients[rows], "gradient"
+    )
+    hessian_scale = _histogram_accumulation_scale(
+        hessians[rows], "Hessian"
+    )
     if rows.size == 0 or features.size == 0:
         return Histogram(
             gradient_sums=gradient_sums,
             hessian_sums=hessian_sums,
             counts=counts,
             layout=layout,
+            gradient_scale=gradient_scale,
+            hessian_scale=hessian_scale,
         )
 
     # Unique rows plus multiplicities preserves direct-helper duplicate-row
@@ -1054,6 +1175,8 @@ def _build_histogram_direct(
         hessian_sums=hessian_sums,
         counts=counts,
         layout=layout,
+        gradient_scale=gradient_scale,
+        hessian_scale=hessian_scale,
     )
 
 
@@ -1081,12 +1204,20 @@ def _build_histogram_validated(
     gradient_sums = np.zeros(total_bins, dtype=np.float64)
     hessian_sums = np.zeros(total_bins, dtype=np.float64)
     counts = np.zeros(total_bins, dtype=np.int64)
+    gradient_scale = _histogram_accumulation_scale(
+        gradients[rows], "gradient"
+    )
+    hessian_scale = _histogram_accumulation_scale(
+        hessians[rows], "Hessian"
+    )
     if rows.size == 0 or features.size == 0:
         return Histogram(
             gradient_sums=gradient_sums,
             hessian_sums=hessian_sums,
             counts=counts,
             layout=layout,
+            gradient_scale=gradient_scale,
+            hessian_scale=hessian_scale,
         )
 
     csr = data.csr
@@ -1196,6 +1327,8 @@ def _build_histogram_validated(
         hessian_sums=hessian_sums,
         counts=counts,
         layout=layout,
+        gradient_scale=gradient_scale,
+        hessian_scale=hessian_scale,
     )
 
 
@@ -1437,7 +1570,7 @@ def find_best_split(
     )
 
 
-def _find_best_split_validated(
+def _find_best_split_scalar_validated(
     *,
     gradients: np.ndarray,
     hessians: np.ndarray,
@@ -1456,13 +1589,24 @@ def _find_best_split_validated(
     reg_alpha: float,
     reg_lambda: float,
 ) -> SplitInfo | None:
-    """Search split candidates from normalized histogram/context state."""
-    parent_denominator = parent_hessian + reg_lambda
-    if parent_denominator > EPSILON:
-        parent_thresholded = float(soft_threshold(parent_gradient, reg_alpha))
-        parent_score = (parent_thresholded * parent_thresholded) / parent_denominator
-    else:
-        parent_score = 0.0
+    """Return the pre-OPT8 scalar split-search result for parity checks.
+
+    This private helper deliberately retains the old threshold loop as a
+    correctness oracle.  Training calls the vectorized kernel below directly;
+    this function is not part of the public split-search API.
+    """
+    # Keep overflow/invalid handling local to split-score arithmetic.  Public
+    # callers may set NumPy to raise globally; non-finite scores are filtered
+    # below rather than leaking those warnings out of this trusted kernel.
+    with np.errstate(over="ignore", invalid="ignore"):
+        parent_denominator = parent_hessian + reg_lambda
+        if parent_denominator > EPSILON:
+            parent_thresholded = float(soft_threshold(parent_gradient, reg_alpha))
+            parent_score = (
+                parent_thresholded * parent_thresholded
+            ) / parent_denominator
+        else:
+            parent_score = 0.0
 
     best: SplitInfo | None = None
     best_gain = -np.inf
@@ -1496,10 +1640,11 @@ def _find_best_split_validated(
             continue
 
         # Keep prefix accumulation and threshold visitation in the exact
-        # order used by the checked implementation.
-        gradient_prefix = np.cumsum(gradients[start:end], dtype=np.float64)
-        hessian_prefix = np.cumsum(hessians[start:end], dtype=np.float64)
-        count_prefix = np.cumsum(counts[start:end], dtype=np.int64)
+        # order used by the pre-OPT8 scalar implementation.
+        with np.errstate(over="ignore", invalid="ignore"):
+            gradient_prefix = np.cumsum(gradients[start:end], dtype=np.float64)
+            hessian_prefix = np.cumsum(hessians[start:end], dtype=np.float64)
+            count_prefix = np.cumsum(counts[start:end], dtype=np.int64)
         for threshold in range(feature_bin_count - 1):
             left_count = int(count_prefix[threshold])
             right_count = parent_count - left_count
@@ -1508,25 +1653,31 @@ def _find_best_split_validated(
 
             left_gradient = float(gradient_prefix[threshold])
             left_hessian = float(hessian_prefix[threshold])
-            right_gradient = parent_gradient - left_gradient
-            right_hessian = parent_hessian - left_hessian
+            with np.errstate(over="ignore", invalid="ignore"):
+                right_gradient = parent_gradient - left_gradient
+                right_hessian = parent_hessian - left_hessian
             if left_hessian < min_child_weight or right_hessian < min_child_weight:
                 continue
 
-            left_denominator = left_hessian + reg_lambda
-            right_denominator = right_hessian + reg_lambda
-            if left_denominator > EPSILON:
-                left_thresholded = float(soft_threshold(left_gradient, reg_alpha))
-                left_score = (left_thresholded * left_thresholded) / left_denominator
-            else:
-                left_score = 0.0
-            if right_denominator > EPSILON:
-                right_thresholded = float(soft_threshold(right_gradient, reg_alpha))
-                right_score = (right_thresholded * right_thresholded) / right_denominator
-            else:
-                right_score = 0.0
+            with np.errstate(over="ignore", invalid="ignore"):
+                left_denominator = left_hessian + reg_lambda
+                right_denominator = right_hessian + reg_lambda
+                if left_denominator > EPSILON:
+                    left_thresholded = float(soft_threshold(left_gradient, reg_alpha))
+                    left_score = (
+                        left_thresholded * left_thresholded
+                    ) / left_denominator
+                else:
+                    left_score = 0.0
+                if right_denominator > EPSILON:
+                    right_thresholded = float(soft_threshold(right_gradient, reg_alpha))
+                    right_score = (
+                        right_thresholded * right_thresholded
+                    ) / right_denominator
+                else:
+                    right_score = 0.0
 
-            gain = float(left_score + right_score - parent_score)
+                gain = float(left_score + right_score - parent_score)
             if not np.isfinite(gain) or gain <= min_split_gain:
                 continue
             is_better = (
@@ -1557,6 +1708,324 @@ def _find_best_split_validated(
                 right_gradient=right_gradient,
                 right_hessian=right_hessian,
             )
+
+    return best
+
+
+def _find_best_split_two_bin_batch(
+    *,
+    segments: list[tuple[int, int, int, int]],
+    gradients: np.ndarray,
+    hessians: np.ndarray,
+    counts: np.ndarray,
+    parent_gradient: float,
+    parent_hessian: float,
+    parent_count: int,
+    min_child_samples: int,
+    min_child_weight: float,
+    min_split_gain: float,
+    reg_alpha: float,
+    reg_lambda: float,
+    parent_score: float,
+) -> SplitInfo | None:
+    """Evaluate the sole threshold of all two-bin feature segments together."""
+    if not segments:
+        return None
+    features = np.asarray([segment[0] for segment in segments], dtype=np.int64)
+    starts = np.asarray([segment[1] for segment in segments], dtype=np.intp)
+    defaults = np.asarray([segment[3] for segment in segments], dtype=np.int64)
+    int64_max = np.iinfo(np.int64).max
+
+    # With exactly two bins, direct indexing of bin zero is numerically the
+    # same as the scalar helper's cumsum(...)[0] and avoids one allocation per
+    # feature.  Keep warning suppression aligned with the vectorized kernel.
+    with np.errstate(over="ignore", invalid="ignore"):
+        left_gradients = gradients[starts]
+        left_hessians = hessians[starts]
+        left_counts = counts[starts]
+        right_gradients = parent_gradient - left_gradients
+        right_hessians = parent_hessian - left_hessians
+        if parent_count > int64_max or np.any(left_counts < 0):
+            right_counts = parent_count - left_counts.astype(object)
+        else:
+            right_counts = parent_count - left_counts
+        eligible = (
+            (left_counts >= min_child_samples)
+            & (right_counts >= min_child_samples)
+            & (left_hessians >= min_child_weight)
+            & (right_hessians >= min_child_weight)
+        )
+        candidate_indices = np.flatnonzero(eligible)
+        if candidate_indices.size == 0:
+            return None
+
+        candidate_left_gradients = left_gradients[candidate_indices]
+        candidate_left_hessians = left_hessians[candidate_indices]
+        candidate_left_counts = left_counts[candidate_indices]
+        candidate_right_gradients = right_gradients[candidate_indices]
+        candidate_right_hessians = right_hessians[candidate_indices]
+        candidate_right_counts = right_counts[candidate_indices]
+
+        left_score = np.zeros(candidate_indices.size, dtype=np.float64)
+        left_denominator = candidate_left_hessians + reg_lambda
+        left_positive = left_denominator > EPSILON
+        left_thresholded = soft_threshold(
+            candidate_left_gradients[left_positive], reg_alpha
+        )
+        left_score[left_positive] = (
+            left_thresholded
+            * left_thresholded
+            / left_denominator[left_positive]
+        )
+
+        right_score = np.zeros(candidate_indices.size, dtype=np.float64)
+        right_denominator = candidate_right_hessians + reg_lambda
+        right_positive = right_denominator > EPSILON
+        right_thresholded = soft_threshold(
+            candidate_right_gradients[right_positive], reg_alpha
+        )
+        right_score[right_positive] = (
+            right_thresholded
+            * right_thresholded
+            / right_denominator[right_positive]
+        )
+        gains = left_score + right_score - parent_score
+        gain_mask = np.isfinite(gains) & (gains > min_split_gain)
+        surviving = np.flatnonzero(gain_mask)
+        if surviving.size == 0:
+            return None
+
+        # Resolve exact gain ties by original feature ID, independent of the
+        # order supplied by a direct helper caller.  Every threshold is zero.
+        surviving_gains = gains[surviving]
+        max_gain = np.max(surviving_gains)
+        max_positions = surviving[surviving_gains == max_gain]
+        winner_feature = np.min(features[candidate_indices[max_positions]])
+        winner_positions = max_positions[
+            features[candidate_indices[max_positions]] == winner_feature
+        ]
+        winner_position = int(winner_positions[0])
+        winner_index = int(candidate_indices[winner_position])
+
+        return SplitInfo(
+            gain=float(gains[winner_position]),
+            feature=int(features[winner_index]),
+            threshold_bin=0,
+            default_left=bool(defaults[winner_index] <= 0),
+            left_count=int(candidate_left_counts[winner_position]),
+            right_count=int(candidate_right_counts[winner_position]),
+            left_gradient=float(candidate_left_gradients[winner_position]),
+            left_hessian=float(candidate_left_hessians[winner_position]),
+            right_gradient=float(candidate_right_gradients[winner_position]),
+            right_hessian=float(candidate_right_hessians[winner_position]),
+        )
+
+
+def _find_best_split_validated(
+    *,
+    gradients: np.ndarray,
+    hessians: np.ndarray,
+    counts: np.ndarray,
+    features: np.ndarray,
+    parent_gradient: float,
+    parent_hessian: float,
+    parent_count: int,
+    n_bins: np.ndarray,
+    offsets: np.ndarray,
+    defaults: np.ndarray,
+    layout: HistogramLayout | None,
+    min_child_samples: int,
+    min_child_weight: float,
+    min_split_gain: float,
+    reg_alpha: float,
+    reg_lambda: float,
+) -> SplitInfo | None:
+    """Search split candidates from normalized histogram/context state."""
+    # Keep overflow/invalid handling local to split-score arithmetic.  Public
+    # callers may set NumPy to raise globally; non-finite scores are filtered
+    # below rather than leaking those warnings out of this trusted kernel.
+    with np.errstate(over="ignore", invalid="ignore"):
+        parent_denominator = parent_hessian + reg_lambda
+        if parent_denominator > EPSILON:
+            parent_thresholded = float(soft_threshold(parent_gradient, reg_alpha))
+            parent_score = (
+                parent_thresholded * parent_thresholded
+            ) / parent_denominator
+        else:
+            parent_score = 0.0
+
+    best: SplitInfo | None = None
+    best_gain = -np.inf
+    best_feature = int(n_bins.size)
+    best_threshold = int(np.max(n_bins)) if n_bins.size else 1
+    int64_max = np.iinfo(np.int64).max
+
+    if layout is None:
+        feature_segments = [
+            (
+                int(feature),
+                int(offsets[int(feature)]),
+                int(offsets[int(feature) + 1]),
+                int(defaults[int(feature)]),
+            )
+            for feature in features
+        ]
+    else:
+        feature_segments = [
+            (
+                int(feature),
+                int(layout.bin_offsets[local_slot]),
+                int(layout.bin_offsets[local_slot + 1]),
+                int(layout.default_bins[local_slot]),
+            )
+            for local_slot, feature in enumerate(layout.feature_indices)
+        ]
+
+    two_bin_segments = [
+        segment for segment in feature_segments if segment[2] - segment[1] == 2
+    ]
+    non_two_bin_segments = [
+        segment for segment in feature_segments if segment[2] - segment[1] != 2
+    ]
+    two_bin_best = _find_best_split_two_bin_batch(
+        segments=two_bin_segments,
+        gradients=gradients,
+        hessians=hessians,
+        counts=counts,
+        parent_gradient=parent_gradient,
+        parent_hessian=parent_hessian,
+        parent_count=parent_count,
+        min_child_samples=min_child_samples,
+        min_child_weight=min_child_weight,
+        min_split_gain=min_split_gain,
+        reg_alpha=reg_alpha,
+        reg_lambda=reg_lambda,
+        parent_score=parent_score,
+    )
+    if two_bin_best is not None:
+        best = two_bin_best
+        best_gain = float(two_bin_best.gain)
+        best_feature = int(two_bin_best.feature)
+        best_threshold = int(two_bin_best.threshold_bin)
+
+    for feature, start, end, default_bin in non_two_bin_segments:
+        feature_bin_count = end - start
+        if feature_bin_count <= 1:
+            continue
+
+        # Keep prefix accumulation in the exact order used by the checked
+        # implementation, while evaluating all thresholds for this feature
+        # with NumPy operations below.
+        with np.errstate(over="ignore", invalid="ignore"):
+            gradient_prefix = np.cumsum(gradients[start:end], dtype=np.float64)
+            hessian_prefix = np.cumsum(hessians[start:end], dtype=np.float64)
+            count_prefix = np.cumsum(counts[start:end], dtype=np.int64)
+        # Every candidate boundary is represented by the prefix ending at the
+        # bin immediately to its left.  Gather only thresholds satisfying the
+        # scalar guard sequence before allocating score arrays; this keeps the
+        # temporary vectors bounded by one feature's bin count.
+        left_gradients = gradient_prefix[:-1]
+        left_hessians = hessian_prefix[:-1]
+        left_counts = count_prefix[:-1]
+        with np.errstate(over="ignore", invalid="ignore"):
+            right_gradients = parent_gradient - left_gradients
+            right_hessians = parent_hessian - left_hessians
+            # Normal training counts fit in int64.  Keep the direct helper's
+            # scalar behavior for a validated, unusually large parent count
+            # too; an object subtraction avoids NumPy's int64 overflow in
+            # that case.
+            if parent_count > int64_max or np.any(left_counts < 0):
+                right_counts = parent_count - left_counts.astype(object)
+            else:
+                right_counts = parent_count - left_counts
+        eligible = (
+            (left_counts >= min_child_samples)
+            & (right_counts >= min_child_samples)
+            & (left_hessians >= min_child_weight)
+            & (right_hessians >= min_child_weight)
+        )
+        candidate_indices = np.flatnonzero(eligible)
+        if candidate_indices.size == 0:
+            continue
+
+        eligible_left_gradients = left_gradients[candidate_indices]
+        eligible_left_hessians = left_hessians[candidate_indices]
+        eligible_left_counts = left_counts[candidate_indices]
+        eligible_right_gradients = right_gradients[candidate_indices]
+        eligible_right_hessians = right_hessians[candidate_indices]
+        eligible_right_counts = right_counts[candidate_indices]
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            left_score = np.zeros(candidate_indices.size, dtype=np.float64)
+            left_denominator = eligible_left_hessians + reg_lambda
+            left_positive = left_denominator > EPSILON
+            left_thresholded = soft_threshold(
+                eligible_left_gradients[left_positive], reg_alpha
+            )
+            left_score[left_positive] = (
+                left_thresholded
+                * left_thresholded
+                / left_denominator[left_positive]
+            )
+
+            right_score = np.zeros(candidate_indices.size, dtype=np.float64)
+            right_denominator = eligible_right_hessians + reg_lambda
+            right_positive = right_denominator > EPSILON
+            right_thresholded = soft_threshold(
+                eligible_right_gradients[right_positive], reg_alpha
+            )
+            right_score[right_positive] = (
+                right_thresholded
+                * right_thresholded
+                / right_denominator[right_positive]
+            )
+
+            gains = left_score + right_score - parent_score
+        gain_mask = np.isfinite(gains) & (gains > min_split_gain)
+        surviving = np.flatnonzero(gain_mask)
+        if surviving.size == 0:
+            continue
+
+        # ``candidate_indices`` and ``surviving`` are ascending, so argmax's
+        # first-maximum behavior preserves the scalar lower-threshold tie break.
+        winner_position = int(surviving[np.argmax(gains[surviving])])
+        gain = float(gains[winner_position])
+        threshold = int(candidate_indices[winner_position])
+        left_count = int(eligible_left_counts[winner_position])
+        right_count = int(eligible_right_counts[winner_position])
+        left_gradient = float(eligible_left_gradients[winner_position])
+        left_hessian = float(eligible_left_hessians[winner_position])
+        right_gradient = float(eligible_right_gradients[winner_position])
+        right_hessian = float(eligible_right_hessians[winner_position])
+
+        is_better = (
+            best is None
+            or gain > best_gain
+            or (
+                gain == best_gain
+                and (
+                    feature < best_feature
+                    or (feature == best_feature and threshold < best_threshold)
+                )
+            )
+        )
+        if not is_better:
+            continue
+        best_gain = gain
+        best_feature = feature
+        best_threshold = threshold
+        best = SplitInfo(
+            gain=gain,
+            feature=feature,
+            threshold_bin=threshold,
+            default_left=bool(default_bin <= threshold),
+            left_count=left_count,
+            right_count=right_count,
+            left_gradient=left_gradient,
+            left_hessian=left_hessian,
+            right_gradient=right_gradient,
+            right_hessian=right_hessian,
+        )
 
     return best
 
@@ -1724,7 +2193,10 @@ def partition_rows(
     if feature < 0 or feature >= n_features:
         raise ValueError("split feature is outside the dataset feature range")
     feature_bin_count = int(n_bins[feature])
-    if threshold < 0 or threshold >= feature_bin_count:
+    # A split threshold denotes a boundary *between* adjacent bins.  The
+    # terminal bin has no bin to its right, so it is never a valid boundary;
+    # one-bin features consequently have no valid thresholds at all.
+    if threshold < 0 or threshold >= feature_bin_count - 1:
         raise ValueError("split threshold_bin is outside the feature bin range")
 
     raw_default_left = np.asarray(split_default_left)
@@ -1850,6 +2322,15 @@ def _fit_tree(
     *,
     use_histogram_subtraction: bool,
     _histogram_cache_bytes: int | None = None,
+    _validated_storage: tuple[
+        sp.csr_matrix,
+        sp.csc_matrix,
+        BinMapper,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]
+    | None = None,
 ) -> DecisionTree:
     """Fit one tree, optionally using histogram subtraction for child leaves."""
     # Keep the tree builder's validation local to the arguments it consumes.
@@ -1865,9 +2346,12 @@ def _fit_tree(
     # Validate canonical sparse storage and mapper metadata once.  Every
     # trusted leaf kernel below receives this normalized context and therefore
     # does not repeat structural checks for each child.
-    csr, csc, mapper, n_bins, defaults, offsets = _validate_tree_storage(
-        data, n_samples, n_features
-    )
+    if _validated_storage is None:
+        csr, csc, mapper, n_bins, defaults, offsets = _validate_tree_storage(
+            data, n_samples, n_features
+        )
+    else:
+        csr, csc, mapper, n_bins, defaults, offsets = _validated_storage
 
     try:
         raw_rows = np.asarray(row_indices)
@@ -2058,38 +2542,37 @@ def _fit_tree(
         defaults=context.defaults,
         total_bins=int(context.layout.bin_offsets[-1]),
     )
-    if max_depth <= 0 or 0 < max_depth:
-        root_split = _find_best_split_validated(
-            gradients=root_histogram.gradient_sums,
-            hessians=root_histogram.hessian_sums,
-            counts=root_histogram.counts,
-            features=context.features,
-            parent_gradient=root_gradient,
-            parent_hessian=root_hessian,
-            parent_count=int(rows.size),
-            n_bins=context.n_bins,
-            offsets=context.offsets,
-            defaults=context.defaults,
-            layout=context.layout,
-            min_child_samples=context.min_child_samples,
-            min_child_weight=context.min_child_weight,
-            min_split_gain=context.min_split_gain,
-            reg_alpha=context.reg_alpha,
-            reg_lambda=context.reg_lambda,
+    root_split = _find_best_split_validated(
+        gradients=root_histogram.gradient_sums,
+        hessians=root_histogram.hessian_sums,
+        counts=root_histogram.counts,
+        features=context.features,
+        parent_gradient=root_gradient,
+        parent_hessian=root_hessian,
+        parent_count=int(rows.size),
+        n_bins=context.n_bins,
+        offsets=context.offsets,
+        defaults=context.defaults,
+        layout=context.layout,
+        min_child_samples=context.min_child_samples,
+        min_child_weight=context.min_child_weight,
+        min_split_gain=context.min_split_gain,
+        reg_alpha=context.reg_alpha,
+        reg_lambda=context.reg_lambda,
+    )
+    if root_split is not None:
+        heapq.heappush(
+            queue,
+            (
+                -float(root_split.gain),
+                int(root_split.feature),
+                int(root_split.threshold_bin),
+                0,
+                root_split,
+            ),
         )
-        if root_split is not None:
-            heapq.heappush(
-                queue,
-                (
-                    -float(root_split.gain),
-                    int(root_split.feature),
-                    int(root_split.threshold_bin),
-                    0,
-                    root_split,
-                ),
-            )
-            if histogram_cache is not None:
-                histogram_cache.put(0, root_histogram)
+        if histogram_cache is not None:
+            histogram_cache.put(0, root_histogram)
     # If the root is terminal its histogram is no longer needed.  When it is
     # queued, the cache above is the sole remaining owner after this scope.
     del root_histogram
@@ -2328,6 +2811,222 @@ def fit_tree(
         config,
         use_histogram_subtraction=True,
     )
+
+
+def _prediction_scalar_integer(value: Any, name: str) -> int:
+    """Normalize one integer field from a stored tree."""
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be an integer scalar") from exc
+    if raw.ndim != 0:
+        raise ValueError(f"{name} must be an integer scalar")
+    dtype = raw.dtype
+    if np.issubdtype(dtype, np.bool_) or not np.issubdtype(
+        dtype, np.number
+    ) or np.issubdtype(dtype, np.complexfloating):
+        raise ValueError(f"{name} must be an integer scalar")
+    if np.issubdtype(dtype, np.integer):
+        number = int(raw.item())
+    else:
+        try:
+            numeric = float(raw.item())
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be an integer scalar") from exc
+        if not np.isfinite(numeric) or numeric != np.trunc(numeric):
+            raise ValueError(f"{name} must be an integer scalar")
+        number = int(numeric)
+    int64_info = np.iinfo(np.int64)
+    if number < int64_info.min or number > int64_info.max:
+        raise ValueError(f"{name} must be representable as int64")
+    return number
+
+
+def _prediction_scalar_float(value: Any, name: str) -> float:
+    """Normalize one finite floating-point field from a stored tree."""
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a finite numeric scalar") from exc
+    if raw.ndim != 0:
+        raise ValueError(f"{name} must be a finite numeric scalar")
+    dtype = raw.dtype
+    if np.issubdtype(dtype, np.bool_) or not np.issubdtype(
+        dtype, np.number
+    ) or np.issubdtype(dtype, np.complexfloating):
+        raise ValueError(f"{name} must be a finite numeric scalar")
+    try:
+        number = float(raw.item())
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a finite numeric scalar") from exc
+    if not np.isfinite(number):
+        raise ValueError(f"{name} must be a finite numeric scalar")
+    return number
+
+
+def _prediction_scalar_bool(value: Any, name: str) -> bool:
+    """Normalize one strict boolean field from a stored tree."""
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a boolean scalar") from exc
+    if raw.ndim != 0 or raw.dtype != np.dtype(bool):
+        raise ValueError(f"{name} must be a boolean scalar")
+    return bool(raw.item())
+
+
+def _validate_prediction_tree(
+    tree: DecisionTree,
+    n_features: int,
+    n_bins: np.ndarray,
+    defaults: np.ndarray,
+) -> list[tuple[int, float, int, int, bool, int, int]]:
+    """Validate one stored tree without revalidating shared binned storage."""
+    try:
+        nodes = tree.nodes
+        node_count = len(nodes)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("tree must contain a non-empty nodes sequence") from exc
+    if node_count == 0:
+        raise ValueError("tree must contain at least one node")
+
+    normalized_nodes: list[tuple[int, float, int, int, bool, int, int]] = []
+    for index, node in enumerate(nodes):
+        try:
+            depth = _prediction_scalar_integer(
+                node.depth, f"tree node {index} depth"
+            )
+            value = _prediction_scalar_float(
+                node.value, f"tree node {index} value"
+            )
+            feature = _prediction_scalar_integer(
+                node.feature, f"tree node {index} feature"
+            )
+            threshold = _prediction_scalar_integer(
+                node.threshold_bin, f"tree node {index} threshold_bin"
+            )
+            default_left = _prediction_scalar_bool(
+                node.default_left, f"tree node {index} default_left"
+            )
+            left_child = _prediction_scalar_integer(
+                node.left_child, f"tree node {index} left_child"
+            )
+            right_child = _prediction_scalar_integer(
+                node.right_child, f"tree node {index} right_child"
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"tree node {index} has invalid metadata") from exc
+        if depth < 0:
+            raise ValueError(f"tree node {index} depth must be non-negative")
+        if (left_child < 0) != (right_child < 0):
+            raise ValueError(f"tree node {index} must have both or neither child")
+        if left_child < -1 or right_child < -1:
+            raise ValueError(f"tree node {index} child index is invalid")
+        if left_child >= node_count or right_child >= node_count:
+            raise ValueError(f"tree node {index} child index is out of range")
+        if left_child == index or right_child == index:
+            raise ValueError(f"tree node {index} cannot be its own child")
+        if left_child >= 0:
+            if feature < 0 or feature >= n_features:
+                raise ValueError(f"tree node {index} split feature is out of range")
+            if threshold < 0 or threshold >= n_bins[feature] - 1:
+                raise ValueError(
+                    f"tree node {index} threshold_bin is out of range"
+                )
+            if default_left != (defaults[feature] <= threshold):
+                raise ValueError(
+                    f"tree node {index} default_left disagrees with mapper default"
+                )
+        normalized_nodes.append(
+            (depth, value, feature, threshold, default_left, left_child, right_child)
+        )
+
+    if normalized_nodes[0][0] != 0:
+        raise ValueError("tree root depth must be zero")
+    parent_count = np.zeros(node_count, dtype=np.int64)
+    for index, (_, _, _, _, _, left_child, right_child) in enumerate(
+        normalized_nodes
+    ):
+        if left_child >= 0:
+            if left_child == 0 or right_child == 0:
+                raise ValueError("tree root cannot have a parent")
+            parent_count[left_child] += 1
+            parent_count[right_child] += 1
+            if (
+                normalized_nodes[left_child][0] != normalized_nodes[index][0] + 1
+                or normalized_nodes[right_child][0]
+                != normalized_nodes[index][0] + 1
+            ):
+                raise ValueError("tree child depths must increase by one")
+    if parent_count[0] != 0 or np.any(parent_count[1:] != 1):
+        raise ValueError("tree nodes must form one rooted tree")
+    reachable = np.zeros(node_count, dtype=bool)
+    pending_nodes = [0]
+    while pending_nodes:
+        index = pending_nodes.pop()
+        if reachable[index]:
+            raise ValueError("tree contains a cycle")
+        reachable[index] = True
+        left_child, right_child = normalized_nodes[index][5:7]
+        if left_child >= 0:
+            pending_nodes.extend((left_child, right_child))
+    if not np.all(reachable):
+        raise ValueError("tree contains unreachable nodes")
+    return normalized_nodes
+
+
+def _predict_tree_raw_validated(
+    tree: DecisionTree,
+    *,
+    n_samples: int,
+    n_features: int,
+    csc: sp.csc_matrix,
+    n_bins: np.ndarray,
+    defaults: np.ndarray,
+) -> np.ndarray:
+    """Predict after shared binned storage has passed tree validation once."""
+    normalized_nodes = _validate_prediction_tree(
+        tree, n_features, n_bins, defaults
+    )
+    indptr = np.asarray(csc.indptr)
+    indices = np.asarray(csc.indices)
+    encoded = np.asarray(csc.data)
+    predictions = np.empty(n_samples, dtype=np.float64)
+    pending: list[tuple[int, np.ndarray]] = [
+        (0, np.arange(n_samples, dtype=np.int64))
+    ]
+    while pending:
+        node_index, rows = pending.pop()
+        _, value, feature, threshold, default_left, left_child, right_child = (
+            normalized_nodes[node_index]
+        )
+        if left_child < 0:
+            predictions[rows] = value
+            continue
+        if rows.size == 0:
+            continue
+
+        column_start, column_end = int(indptr[feature]), int(indptr[feature + 1])
+        stored_rows = indices[column_start:column_end]
+        stored_bins = encoded[column_start:column_end]
+        go_left = np.full(rows.size, default_left, dtype=bool)
+        if stored_rows.size:
+            positions = np.searchsorted(stored_rows, rows, side="left")
+            in_range = positions < stored_rows.size
+            if np.any(in_range):
+                safe_positions = np.minimum(positions, stored_rows.size - 1)
+                matches = in_range & (stored_rows[safe_positions] == rows)
+                if np.any(matches):
+                    go_left[matches] = (
+                        stored_bins[positions[matches]] <= threshold + 1
+                    )
+        left_rows = rows[go_left]
+        right_rows = rows[~go_left]
+        if right_rows.size:
+            pending.append((right_child, right_rows))
+        if left_rows.size:
+            pending.append((left_child, left_rows))
+    return predictions
 
 
 def predict_tree_raw(tree: DecisionTree, data: BinnedDataset) -> np.ndarray:
@@ -2597,7 +3296,10 @@ def predict_tree_raw(tree: DecisionTree, data: BinnedDataset) -> np.ndarray:
         if left_child >= 0:
             if feature < 0 or feature >= n_features:
                 raise ValueError(f"tree node {index} split feature is out of range")
-            if threshold < 0 or threshold >= n_bins[feature]:
+            # Split thresholds are boundaries between bins, not bin labels.
+            # ``n_bins - 1`` is terminal and therefore invalid (including for
+            # one-bin features, which have no legal split boundary).
+            if threshold < 0 or threshold >= n_bins[feature] - 1:
                 raise ValueError(
                     f"tree node {index} threshold_bin is out of range"
                 )

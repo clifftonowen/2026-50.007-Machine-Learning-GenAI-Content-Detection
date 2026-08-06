@@ -2,11 +2,12 @@
 
 ## Status
 
-Complete. `fit_tree` now validates immutable tree inputs once into a private
-trusted context and uses private histogram, split-search, and row-partition
-kernels during leaf growth. The directly callable public helpers retain their
-checked wrappers, including finite derivative, sparse-storage, index, split,
-and histogram validation.
+Complete. The estimator validates its internally produced binned dataset once
+per fit or prediction operation. Every boosting iteration reuses that normalized
+storage in private tree-growth and prediction kernels, while each stored tree
+graph is still checked before estimator prediction. The directly callable public
+helpers retain their checked wrappers, including finite derivative,
+sparse-storage, index, split, tree-graph, and histogram validation.
 
 ## Objective
 
@@ -82,10 +83,11 @@ Keep `partition_rows(...)` validating direct calls. Tree growth should use
 `_partition_rows_validated(...)`, with a validated split and canonical CSC
 storage. Preserve row order and duplicate-row behavior.
 
-Do not optimize `predict_tree_raw` in this step unless profiling shows its
-validation is material after the three training kernels above are fixed. If it
-is optimized, retain the same wrapper/kernel pattern and use the private path
-only for freshly built or already validated trees.
+Profiling later showed `predict_tree_raw` validation to be material at the
+project's feature count. It therefore follows the same wrapper/kernel pattern:
+direct calls remain fully checked, while the estimator reuses storage that it
+validated once and calls a private traversal that separately validates each tree
+graph.
 
 ## Validation ownership
 
@@ -156,3 +158,12 @@ mapper fitting.
   leaf-growth loop.
 - The implementation remains deterministic and uses only NumPy, SciPy, and the
   standard library.
+
+## Follow-up validation-reuse evidence
+
+A local synthetic isolation probe used 10 rows, 40,385 one-bin features, and
+three root-only trees. Three direct `predict_tree_raw` calls, each performing
+full checked validation, took 5.37 seconds. One shared storage validation plus
+three private tree validations/traversals took 0.286 seconds, an 18.8x reduction.
+Outputs were identical. This deliberately isolates validation overhead; it is
+not a complete-tree or target-dataset runtime measurement.

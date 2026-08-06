@@ -2,7 +2,8 @@
 
 ## Status: completed
 
-OPT1 is implemented in `src/lite_lightgbm.py`. `fit_bin_mapper` now delegates
+OPT1 is implemented in `src/lite_lightgbm_dep/binning.py` and re-exported through
+the stable `src.lite_lightgbm` facade. `fit_bin_mapper` now delegates
 per-feature boundary selection to `_find_bin_boundaries`; its inner candidate
 scan uses NumPy cumulative counts, slices, masks, and stable `argmin`, while
 the sequential outer boundary loop remains intact. Independent verification

@@ -2,13 +2,23 @@
 
 ## Status
 
-Planned. This optimization is not implemented in the current worktree.
+Implementation and correctness are complete. The trusted
+`_find_best_split_validated(...)` kernel evaluates thresholds with NumPy vectors
+and batches the sole threshold of all two-bin features, while retaining one
+bounded loop over wider feature segments and no Python loop over candidate
+thresholds. A private `_find_best_split_scalar_validated(...)` helper retains
+the pre-OPT8 threshold loop as a correctness oracle for focused parity checks;
+normal training calls only the vectorized kernel. Direct-kernel microbenchmarks
+now cover the low-bin and representative multi-bin shapes; no full-tree or
+target-dataset timing is claimed here.
 
 ## Objective
 
 Replace the Python loop over every candidate threshold in split search with
-NumPy array operations. Keep one bounded Python loop over selected features so
-each feature's histogram segment is handled independently.
+NumPy array operations. Keep one bounded Python loop over selected wider
+features so each multi-bin histogram segment is handled independently, and
+evaluate all two-bin features in one batched operation because each has only
+the threshold between bins 0 and 1.
 
 The optimization must preserve:
 
@@ -90,7 +100,10 @@ equivalent mapper default for the global layout.
 ## Vectorization boundary
 
 Vectorize thresholds within one feature. Do not flatten every feature and
-threshold into a single project-wide array in the first implementation.
+threshold into a single project-wide array in the first implementation. The
+sole threshold of every two-bin feature is a special batched case: gather bin-0
+statistics across those features, score them together, and leave wider
+segments on the per-feature threshold-vector path.
 
 The per-feature design is intentional:
 
@@ -102,6 +115,11 @@ The per-feature design is intentional:
 - a bounded feature loop is much cheaper than millions of threshold iterations.
 
 Do not use `np.vectorize`; it still executes Python once per element.
+
+The two-bin batch keeps direct-helper feature order for statistics but resolves
+exact gain ties by original feature ID, matching the scalar global tie-break.
+Constant one-bin features are skipped, and mixed bin-count layouts split into
+the batch plus the established wider-segment loop.
 
 ## Detailed algorithm
 
@@ -251,8 +269,8 @@ fallback only after a reproducing test proves it necessary.
 
 ## Reference implementation
 
-Retain the current scalar threshold loop as a correctness oracle while OPT8 is
-being verified. Prefer one of these forms:
+Retain the scalar threshold loop as a correctness oracle for parity checks.
+Prefer one of these forms:
 
 1. a private `_find_best_split_scalar_validated(...)` helper used only by
    tests; or
@@ -292,6 +310,12 @@ statistics from the segment totals so the fixtures obey histogram invariants.
 Sweep several combinations of child constraints and regularization. Compare the
 complete returned `SplitInfo`, not only its gain.
 
+The focused split-search regression covers all-two-bin global and compact local
+layouts, mixed one-/two-/multi-bin features, unsorted direct feature order,
+exact feature ties, non-finite gain filtering, and parent-count overflow. The
+vectorized and scalar helpers match exactly on these fixtures and randomized
+parity sweeps.
+
 Include deliberately invalid direct-helper inputs in the existing OPT4 tests to
 confirm the checked public wrapper still raises the same exception classes and
 messages. The private vectorized kernel is not responsible for malformed input.
@@ -312,6 +336,26 @@ rows, features, and configuration. Require identical:
 Repeat complete estimator comparisons for dense, CSR, and CSC logical inputs,
 including feature subsampling, row bagging, sample weights, balanced class
 weights, constant columns, and an all-filtered matrix.
+
+## Direct-kernel benchmark record (local venv, 3-run medians)
+
+The following excludes mapper fitting and full-tree orchestration. Each case
+uses the same synthetic flattened histogram for the vectorized kernel and the
+private scalar oracle:
+
+| shape | vectorized | scalar oracle | scalar/vector speedup |
+| --- | ---: | ---: | ---: |
+| 5,000 features × 2 bins | 0.0106 s | 0.2413 s | 22.7× |
+| 40,385 features × 2 bins | 0.1147 s | 2.6489 s | 23.1× |
+| 5,000 features × 8 bins | 0.8533 s | 1.0643 s | 1.25× |
+| 5,000 features × 32 bins | 0.9469 s | 3.9931 s | 4.22× |
+| 5,000 mixed 2/8/32-bin features | 0.7515 s | 1.9394 s | 2.58× |
+
+The pre-F2 local measurements were 0.993 s versus 0.314 s for the 5,000 ×
+2-bin case and 8.04 s versus 2.32 s for 40,385 × 2 bins (vectorized versus
+scalar); those measurements motivated the batched low-bin path. The current
+records are direct-kernel evidence only: no full-tree or target-dataset timing
+is claimed.
 
 ## Benchmark plan
 
@@ -337,10 +381,9 @@ after optimizations 4-7, reporting:
 - node and split parity; and
 - peak process memory.
 
-The expected target is at least a 3x reduction in aggregate split-search time
-and a material complete-tree improvement. Treat this as a performance target,
-not a correctness exemption: if it is missed, profile before attempting a more
-complex all-feature flattening design.
+Treat any complete-tree speedup as a separate measurement, not a correctness
+exemption. If a target-scale run is needed, profile its split/histogram balance
+before attempting a more complex all-feature flattening design.
 
 Finally, run a bounded root or small-tree benchmark on the 40,385-feature
 representation before launching a complete fit.
@@ -352,8 +395,9 @@ Expected implementation ownership:
 - `lite_lightgbm_dep/tree.py`: vectorize the trusted split kernel and retain or
   expose a private scalar oracle for tests;
 - focused tests: scalar/vector split, tree, and estimator parity; and
-- `lite_lightgbm_OPT8.md`: replace planned status with measured completion
-  evidence after implementation.
+- `lite_lightgbm_OPT8.md`: records the vectorized-kernel design and the private
+  scalar-oracle role; direct-kernel benchmark evidence is recorded above, while
+  full-tree and target-scale performance remain unmeasured.
 
 No changes should be required in:
 
@@ -373,7 +417,7 @@ No changes should be required in:
 - Seeded tree topology and predictions remain equivalent.
 - Sparse inputs remain sparse and no scikit-learn or LightGBM dependency is
   introduced.
-- Split-search and complete-tree benchmarks are recorded on the supplied
-  representation.
+- Low-bin and representative multi-bin direct-kernel performance is measured;
+  full-tree and target-scale performance remain pending.
 - The implementation does not add a public optimization switch or alter saved
   model structure.

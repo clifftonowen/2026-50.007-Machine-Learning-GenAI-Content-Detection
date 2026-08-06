@@ -365,7 +365,9 @@ profiling proves it is material.
 
 For each feature, prefix sums across ascending bins provide the left-child statistics;
 right-child statistics are parent totals minus the left values. Evaluate boundaries
-between bins, not after the final bin.
+between bins, not after the final bin. If a feature has `n_bins[j]` bins, the only valid
+threshold bins are `0 .. n_bins[j] - 2`; the terminal bin (`n_bins[j] - 1`) is not a
+boundary, and a one-bin feature has no valid threshold.
 
 Tie-breaking must be deterministic. Use this order unless parity experiments prove a
 different order is necessary:
@@ -474,9 +476,10 @@ with it. Add and test these optimizations in order:
 
 1. **OPT2 — compact bin dtypes** (complete: encoded sparse-bin values use the smallest safe unsigned dtype);
 2. **OPT3 — feature pre-filtering and local histogram layouts** (complete);
-3. **OPT4 — validated internal hot paths** (complete: `fit_tree` validates
-   shared immutable state once, while checked public helper wrappers retain
-   their direct-call validation);
+3. **OPT4 — validated internal hot paths** (complete: the estimator validates
+   its internally produced binned storage once per fit or prediction operation
+   and reuses it across trees; checked public helper wrappers retain their
+   direct-call validation);
 4. **OPT5 — vectorized flattened histogram aggregation** (implemented and
    verified on the supplied 5,000-feature representation: bounded CSR row
    blocks aggregate flattened local-bin keys with `np.bincount`, while the
@@ -492,12 +495,27 @@ with it. Add and test these optimizations in order:
    used 30 versus 59 histogram builds, with only a modest 1.03x median
    total-runtime improvement; synthetic near-tie probes differed in topology in
    116/300 cases with six label flips, while the 128- and 1,200-leaf tests
-   showed no prediction drift);
+   showed no prediction drift. Zero-count residuals and harmless negative
+   Hessian roundoff use a scale-aware `128 * eps` bound. Builder-created
+   histograms carry optional absolute accumulation scales (sum of per-row
+   absolute contributions) for default-bin residuals; derived histograms
+   conservatively propagate both operand scales, while legacy hand-built
+   four-field histograms retain the per-bin fallback. An independently
+   reproduced first-tree diagnostic on the supplied 20,000 x 5,000 CSR
+   representation with the tuned 149-leaf configuration completed 297 nodes
+   and 138 subtractions, rescuing exactly one `117.75 * eps` residual; this is
+   measured first-tree evidence, not a full-ensemble runtime estimate);
 6. **OPT7 — bounded histogram caching** (complete: a private per-tree LRU
    bounds retained queued-leaf histogram buffers; cache misses use direct
    two-child construction without changing candidate eligibility or the public
    estimator API);
-7. **OPT8 — vectorized split evaluation** within each feature.
+7. **OPT8 — vectorized split evaluation** (implementation and correctness
+   complete: the trusted split kernel batches all two-bin features, uses NumPy
+   masks and score vectors for wider segments, and retains no loop over
+   candidate thresholds; a private `_find_best_split_scalar_validated(...)`
+   helper retains the pre-OPT8 loop as a correctness oracle. Direct-kernel
+   low-bin and representative multi-bin benchmark evidence is recorded in
+   `lite_lightgbm_OPT8.md`; full-tree and target-scale timing remain pending).
 
 Each optimization has a standalone implementation contract in the matching
 `lite_lightgbm_OPT<N>.md` file. OPT8 retains the bounded loop over selected features but
@@ -505,17 +523,24 @@ replaces the scalar candidate-threshold loop with array masks and vector score
 calculation. It must preserve the strict gain rule and the existing feature/threshold
 tie-break.
 
-Measured profiling identifies the scalar threshold loop as the dominant tree-building
-cost, while OPT4's one-time validation removes only a small fraction of total work.
-OPT8 is therefore the next priority.
+Measured profiling identified split search as the dominant tree-building cost.
+OPT8 addresses that kernel, while OPT4 also removes feature-count-proportional
+storage revalidation between boosting iterations. A local validation-isolation
+probe with 10 rows, 40,385 one-bin features, and three root-only trees took
+5.37 seconds through three checked public calls versus 0.286 seconds when the
+storage was validated once and reused (18.8x). This is not a full-tree or
+target-data training benchmark.
 
 The extraction-only module refactor in `lite_lightgbm_refac.md` is complete.
 It preserved the `src.lite_lightgbm` façade and exact behavior; OPT3 behavior
 remains outside that extraction.
 
-Complete the remaining performance-critical work through OPT8 before project-scale
-fitting. OPT7 bounds the retained live-histogram memory introduced by OPT6; its default
-budget is a benchmark candidate and should be measured on the target representation.
+The private scalar split-search oracle is retained only for focused parity
+checks; normal training uses the vectorized kernel. Full-tree and target-scale
+performance remain pending. Before project-scale fitting, measure the target
+representation; OPT7 bounds the retained
+live-histogram memory introduced by OPT6, and its default budget remains a
+benchmark candidate.
 Repeated fits with the same private budget remain deterministic, but changing the
 budget can alter tie-prone trees because direct child histograms and histogram
 subtraction accumulate floating statistics in different orders.
