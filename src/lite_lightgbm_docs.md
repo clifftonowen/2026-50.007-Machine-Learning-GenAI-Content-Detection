@@ -257,8 +257,13 @@ invalid hyperparameters before allocating the binned dataset.
 Returns an array of additive logits with shape `(n_samples,)`:
 
 ```text
-init_score_ + learning_rate_ * sum(tree_output)
+raw_scores = init_score_
+for each tree:
+    raw_scores += learning_rate_ * tree_output
 ```
+
+Shrinkage is applied before each addition, matching training and avoiding
+overflow in an unscaled intermediate tree sum.
 
 Prediction requires a fitted estimator, finite numeric input, and exactly
 `n_features_in_` columns.
@@ -276,6 +281,12 @@ calibrated even when their ranking is useful.
 #### `predict(X)`
 
 Returns integer labels. Class `1` requires a probability strictly greater than `0.5`.
+
+#### `score(X, y, sample_weight=None)`
+
+Returns mean classification accuracy, optionally weighted by finite,
+non-negative sample weights with a positive total. This dependency-free method
+supports scikit-learn's default classifier scoring without importing sklearn.
 
 #### `get_params(deep=True)`
 
@@ -321,13 +332,15 @@ A constant feature has one bin and an empty cut-point array.
 
 Contains CSR and CSC views of the same quantized matrix:
 
-- `csr` supports row routing and row-oriented operations;
-- `csc` supports per-feature histogram construction; and
+- `csr` supports row-oriented histogram aggregation;
+- `csc` supports per-feature routing and prediction; and
 - `mapper` describes the encoding.
 
 Only values whose bin differs from the feature's default bin are stored. A stored bin is
 encoded as `bin_id + 1`, leaving SciPy's implicit zero unambiguous. The `shape` property
 returns `(n_samples, n_features)`.
+Checked tree entry points require both sparse views to encode identical
+coordinates and bin values, not merely to be independently well formed.
 
 The encoded values use the smallest safe unsigned dtype for the fitted feature-bin
 layout. Consumers widen these values to signed `int64` before decoding them, so an
@@ -423,6 +436,9 @@ CSR, and CSC representations learn the same deterministic mapper.
 Direct calls require `config.max_bin` and `config.min_data_in_bin` to be finite,
 real, integer-valued scalar numbers (at least `1`); booleans, fractions, complex or
 non-numeric values, non-finite values, and non-scalar arrays are rejected.
+Integer dtypes are converted directly to Python integers, preserving values above
+the exact `float64` range; accepted floating inputs are checked for finite,
+integral, exactly representable values before conversion.
 
 ### `transform_bins(X, mapper)`
 
@@ -461,8 +477,8 @@ Fits one Newton-correction tree using a max-priority queue. It repeatedly splits
 with the highest valid gain until the queue is empty or `num_leaves` is reached. Returned
 leaf corrections are not yet multiplied by the learning rate.
 Directly supplied `BinnedDataset` objects must contain canonical CSR and CSC storage with
-valid sparse structure and mapper-compatible encoded bins; `transform_bins` produces this
-form.
+valid sparse structure, identical logical values, and mapper-compatible encoded bins;
+`transform_bins` produces this form.
 
 ### `predict_tree_raw(tree, data)`
 

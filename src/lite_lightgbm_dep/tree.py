@@ -12,7 +12,12 @@ import numpy as np
 import scipy.sparse as sp
 
 from .binning import BinnedDataset, BinMapper
-from .core import EPSILON, LiteLightGBMConfig, soft_threshold
+from .core import (
+    EPSILON,
+    LiteLightGBMConfig,
+    _normalize_integer_scalar,
+    soft_threshold,
+)
 
 
 # Histogram construction is bounded by source CSR entries rather than by the
@@ -836,6 +841,18 @@ def _validate_tree_storage(
         segment_bin_limits = n_bins[feature_labels]
         if np.any(encoded < 1) or np.any(encoded > segment_bin_limits):
             raise ValueError("data CSC encoded bins are outside mapper ranges")
+
+    # The two orientations are consumed by different trusted kernels.  After
+    # validating both as canonical sparse matrices, compare one canonical CSC
+    # conversion so histogram construction (CSR) and routing (CSC) cannot see
+    # different logical bins.
+    csr_as_csc = csr.tocsc(copy=True)
+    if (
+        not np.array_equal(np.asarray(csr_as_csc.indptr), indptr)
+        or not np.array_equal(np.asarray(csr_as_csc.indices), indices)
+        or not np.array_equal(np.asarray(csr_as_csc.data), encoded_values)
+    ):
+        raise ValueError("data CSR and CSC views must encode identical values")
     return csr, csc, mapper, n_bins, defaults, offsets
 
 
@@ -860,6 +877,11 @@ def build_histogram(
         raw_defaults = np.asarray(mapper.default_bins)
     except (AttributeError, TypeError, ValueError, IndexError) as exc:
         raise ValueError("data must contain a valid binned dataset") from exc
+
+    # Public helpers validate the complete BinnedDataset invariant. Histogram
+    # construction reads CSR, but its result may subsequently drive CSC-based
+    # routing, so inconsistent orientations must be rejected at this boundary.
+    _validate_tree_storage(data, n_samples, n_features)
 
     if (
         raw_offsets.ndim != 1
@@ -1496,18 +1518,16 @@ def find_best_split(
     # but direct split-search calls should not silently accept negative
     # constraints or non-finite regularization values.
     try:
-        raw_min_samples = float(config.min_child_samples)
+        min_child_samples = _normalize_integer_scalar(
+            config.min_child_samples, "min_child_samples"
+        )
         min_child_weight = float(config.min_child_weight)
         min_split_gain = float(config.min_split_gain)
         reg_alpha = float(config.reg_alpha)
         reg_lambda = float(config.reg_lambda)
     except (AttributeError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("split configuration values must be numeric") from exc
-    if (
-        not np.isfinite(raw_min_samples)
-        or raw_min_samples != np.trunc(raw_min_samples)
-        or raw_min_samples < 0
-    ):
+    if min_child_samples < 0:
         raise ValueError("min_child_samples must be a non-negative integer")
     if (
         not np.isfinite(min_child_weight)
@@ -1522,7 +1542,6 @@ def find_best_split(
         raise ValueError(
             "child constraints, gain, and regularization values must be finite and non-negative"
         )
-    min_child_samples = int(raw_min_samples)
 
     parent_values = (parent_gradient, parent_hessian, parent_count)
     parent_names = ("parent_gradient", "parent_hessian", "parent_count")
@@ -2264,6 +2283,11 @@ def partition_rows(
         if np.unique(stored_rows).size != stored_rows.size:
             raise ValueError("data CSC view contains duplicate feature entries")
 
+    # A split is normally chosen from CSR histograms and applied through CSC.
+    # Check their equivalence after preserving the helper's specific malformed-
+    # CSC diagnostics above, but before routing any rows.
+    _validate_tree_storage(data, n_samples, n_features)
+
     return _partition_rows_validated(
         csc=csc,
         rows=rows,
@@ -2416,30 +2440,21 @@ def _fit_tree(
     # has no eligible split (in which case find_best_split would not inspect
     # every configuration field).
     try:
-        raw_num_leaves = float(config.num_leaves)
-        raw_max_depth = float(config.max_depth)
-        min_child_samples = float(config.min_child_samples)
+        num_leaves = _normalize_integer_scalar(config.num_leaves, "num_leaves")
+        max_depth = _normalize_integer_scalar(config.max_depth, "max_depth")
+        min_child_samples = _normalize_integer_scalar(
+            config.min_child_samples, "min_child_samples"
+        )
         min_child_weight = float(config.min_child_weight)
         min_split_gain = float(config.min_split_gain)
         reg_alpha = float(config.reg_alpha)
         reg_lambda = float(config.reg_lambda)
     except (AttributeError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("tree configuration values must be numeric") from exc
-    if (
-        not np.isfinite(raw_num_leaves)
-        or raw_num_leaves != np.trunc(raw_num_leaves)
-        or raw_num_leaves < 2
-    ):
+    if num_leaves < 2:
         raise ValueError("num_leaves must be an integer of at least two")
     if (
-        not np.isfinite(raw_max_depth)
-        or raw_max_depth != np.trunc(raw_max_depth)
-    ):
-        raise ValueError("max_depth must be an integer")
-    if (
-        not np.isfinite(min_child_samples)
-        or min_child_samples != np.trunc(min_child_samples)
-        or min_child_samples < 0
+        min_child_samples < 0
         or not np.isfinite(min_child_weight)
         or not np.isfinite(min_split_gain)
         or not np.isfinite(reg_alpha)
@@ -2452,9 +2467,6 @@ def _fit_tree(
         raise ValueError(
             "child constraints, gain, and regularization values must be finite and non-negative"
         )
-    num_leaves = int(raw_num_leaves)
-    max_depth = int(raw_max_depth)
-    min_child_samples = int(min_child_samples)
 
     context = _TreeContext(
         data=data,
@@ -3031,6 +3043,12 @@ def _predict_tree_raw_validated(
 
 def predict_tree_raw(tree: DecisionTree, data: BinnedDataset) -> np.ndarray:
     """Return one tree's unscaled leaf output for every row."""
+    try:
+        n_samples, n_features = (int(data.shape[0]), int(data.shape[1]))
+    except (AttributeError, TypeError, ValueError, IndexError) as exc:
+        raise ValueError("data must contain a valid binned dataset") from exc
+    _validate_tree_storage(data, n_samples, n_features)
+
     # Prediction walks the array-backed tree one node at a time while keeping
     # row assignments as NumPy index arrays.  In particular, CSC columns are
     # queried with ``searchsorted``; converting the binned matrix to dense form

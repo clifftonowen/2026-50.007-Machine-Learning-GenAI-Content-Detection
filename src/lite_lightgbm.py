@@ -17,6 +17,7 @@ from .lite_lightgbm_dep.core import (
     ClassWeight,
     EPSILON,
     LiteLightGBMConfig,
+    _normalize_integer_scalar,
     sigmoid,
     soft_threshold,
     binary_gradients_hessians,
@@ -230,58 +231,18 @@ class LiteLightGBM:
         )
         normalized_integers: dict[str, int] = {}
         for name, value, lower_bound in integer_parameters:
-            try:
-                raw_value = np.asarray(value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{name} must be an integer scalar") from exc
-            if raw_value.ndim != 0:
-                raise ValueError(f"{name} must be an integer scalar")
-            dtype = raw_value.dtype
-            if (
-                np.issubdtype(dtype, np.bool_)
-                or not np.issubdtype(dtype, np.number)
-                or np.issubdtype(dtype, np.complexfloating)
-            ):
-                raise ValueError(f"{name} must be an integer scalar")
-            try:
-                numeric_value = float(raw_value.item())
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise ValueError(f"{name} must be an integer scalar") from exc
-            if (
-                not np.isfinite(numeric_value)
-                or numeric_value != np.trunc(numeric_value)
-                or numeric_value < lower_bound
-            ):
+            normalized_value = _normalize_integer_scalar(value, name)
+            if normalized_value < lower_bound:
                 raise ValueError(
                     f"{name} must be an integer at least {lower_bound}"
                 )
-            normalized_integers[name] = int(numeric_value)
+            normalized_integers[name] = normalized_value
 
         # max_depth uses non-positive values for unlimited growth; a positive
         # value is still required to be an integer depth.
-        try:
-            raw_max_depth = np.asarray(config.max_depth)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("max_depth must be an integer scalar") from exc
-        if raw_max_depth.ndim != 0:
-            raise ValueError("max_depth must be an integer scalar")
-        max_depth_dtype = raw_max_depth.dtype
-        if (
-            np.issubdtype(max_depth_dtype, np.bool_)
-            or not np.issubdtype(max_depth_dtype, np.number)
-            or np.issubdtype(max_depth_dtype, np.complexfloating)
-        ):
-            raise ValueError("max_depth must be an integer scalar")
-        try:
-            numeric_max_depth = float(raw_max_depth.item())
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("max_depth must be an integer scalar") from exc
-        if (
-            not np.isfinite(numeric_max_depth)
-            or numeric_max_depth != np.trunc(numeric_max_depth)
-        ):
-            raise ValueError("max_depth must be an integer scalar")
-        normalized_max_depth = int(numeric_max_depth)
+        normalized_max_depth = _normalize_integer_scalar(
+            config.max_depth, "max_depth"
+        )
         # Continuous configuration fields must be finite and non-negative (or,
         # for the two sampling fractions, strictly positive and at most one).
         continuous_parameters = (
@@ -680,7 +641,7 @@ class LiteLightGBM:
         if not np.isfinite(init_score) or not np.isfinite(learning_rate):
             raise RuntimeError("LiteLightGBM fitted state is invalid")
 
-        tree_sum = np.zeros(n_samples, dtype=np.float64)
+        raw_scores = np.full(n_samples, init_score, dtype=np.float64)
         try:
             trees = iter(self.trees_)
         except TypeError as exc:
@@ -705,14 +666,9 @@ class LiteLightGBM:
             if not np.isfinite(tree_output).all():
                 raise ValueError("tree predictions must remain finite")
             with np.errstate(over="ignore", invalid="ignore"):
-                tree_sum += tree_output
-            if not np.isfinite(tree_sum).all():
-                raise ValueError("tree predictions must remain finite")
-
-        with np.errstate(over="ignore", invalid="ignore"):
-            raw_scores = init_score + learning_rate * tree_sum
-        if not np.isfinite(raw_scores).all():
-            raise ValueError("predictions must remain finite")
+                raw_scores = raw_scores + learning_rate * tree_output
+            if not np.isfinite(raw_scores).all():
+                raise ValueError("predictions must remain finite")
         return raw_scores
 
     def decision_function(self, X: Matrix) -> np.ndarray:
@@ -728,6 +684,47 @@ class LiteLightGBM:
         """Return class 1 only when its probability is strictly above 0.5."""
         probabilities = self.predict_proba(X)[:, 1]
         return (probabilities > 0.5).astype(np.int64)
+
+    def score(
+        self,
+        X: Matrix,
+        y: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> float:
+        """Return mean classification accuracy, optionally sample-weighted."""
+        predictions = self.predict(X)
+        labels = np.asarray(y)
+        if labels.ndim != 1 or labels.size != predictions.size:
+            raise ValueError("y must be one-dimensional with one label per row")
+        if labels.size == 0:
+            raise ValueError("y must be non-empty")
+        correct = predictions == labels
+        if sample_weight is None:
+            return float(np.mean(correct, dtype=np.float64))
+
+        raw_weights = np.asarray(sample_weight)
+        if raw_weights.ndim != 1 or raw_weights.size != predictions.size:
+            raise ValueError(
+                "sample_weight must be one-dimensional with one value per row"
+            )
+        weight_dtype = raw_weights.dtype
+        if (
+            not np.issubdtype(weight_dtype, np.number)
+            and not np.issubdtype(weight_dtype, np.bool_)
+        ) or np.issubdtype(weight_dtype, np.complexfloating):
+            raise TypeError("sample_weight must contain real numeric values")
+        try:
+            weights = np.asarray(raw_weights, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("sample_weight must contain real numeric values") from exc
+        if not np.isfinite(weights).all() or np.any(weights < 0.0):
+            raise ValueError("sample_weight must be finite and non-negative")
+        total_weight = float(np.sum(weights, dtype=np.float64))
+        if not np.isfinite(total_weight) or total_weight <= 0.0:
+            raise ValueError("sample_weight must have a positive total")
+        return float(
+            np.sum(weights * correct, dtype=np.float64) / total_weight
+        )
 
     def _config(self) -> LiteLightGBMConfig:
         """Snapshot current parameters as an immutable configuration."""

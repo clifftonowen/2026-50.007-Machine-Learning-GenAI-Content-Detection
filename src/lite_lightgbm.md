@@ -129,6 +129,7 @@ names already used in this repository's `LGBMClassifier` experiments. It must ex
 - `decision_function(X)` as a scikit-learn-compatible alias for `predict_raw(X)`;
 - `predict_proba(X)` with columns `[P(y=0), P(y=1)]`;
 - `predict(X)` using class `1` only when its probability is strictly above `0.5`;
+- `score(X, y, sample_weight=None)` returning classification accuracy;
 - `get_params()` and `set_params()` for the repository's sklearn-based CV utilities.
 
 The module must not import from or inherit from scikit-learn. It implements `get_params`,
@@ -201,6 +202,10 @@ Validate configuration before allocating binned data:
 - `max_depth <= 0` means unlimited depth; otherwise it is a positive integer;
 - `class_weight` is `None`, `"balanced"`, or a valid explicit dictionary.
 
+Integer-typed configuration values are converted directly to Python integers,
+without an intermediate floating-point conversion. Integer-valued floating
+inputs must be finite and exactly representable before conversion.
+
 Prediction rejects calls before fitting, non-finite values, non-matrix input, and a
 feature count different from `n_features_in_`.
 
@@ -260,7 +265,8 @@ raw_score += learning_rate * tree_output
 
 Store the fit-time learning rate in `learning_rate_`. Tree node values remain unscaled;
 both training-score updates and `predict_raw` multiply them by `learning_rate_` exactly
-once. Calling `set_params` after fitting must therefore not alter existing predictions.
+once, before adding each tree contribution. Calling `set_params` after fitting must
+therefore not alter existing predictions.
 
 ## Sparse bin representation
 
@@ -277,6 +283,10 @@ keeps both CSR and CSC views of the same logical quantized matrix:
   `uint16` through 65,535, `uint32` through 4,294,967,295, otherwise `uint64`.
   Mapper metadata remain signed `int64`; SciPy structural indices are unchanged and
   may be signed `int32` or `int64`.
+
+Checked tree entry points validate that the CSR and CSC views encode identical
+coordinates and bin values before trusted histogram and routing kernels use
+their respective orientations.
 
 Decode stored values only after widening them to signed `int64`, then subtract one. This
 ensures a malformed stored zero is rejected instead of underflowing in an unsigned dtype.
@@ -622,8 +632,9 @@ The implementation is ready for project use only when:
 - repeated seeded fits produce identical trees and predictions;
 - all learned arrays are finite;
 - model persistence round-trips predictions exactly;
-- an external scikit-learn clone, classifier-tag check, and `cross_val_score` smoke test
-  pass without the estimator module importing scikit-learn;
+- an external scikit-learn clone, classifier-tag check, explicit-scoring CV,
+  and default `cross_val_score` smoke test pass without the estimator module
+  importing scikit-learn;
 - restricted-reference raw-score Spearman correlation is at least 0.95 and label
   agreement is at least 0.90 on the supplied-feature locked out-of-fold predictions;
 - the supplied-feature locked CV score is within 0.01 Macro F1 of the restricted

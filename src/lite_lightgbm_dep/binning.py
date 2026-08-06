@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.sparse as sp
 
-from .core import Matrix, LiteLightGBMConfig
+from .core import Matrix, LiteLightGBMConfig, _normalize_integer_scalar
 
 @dataclass(frozen=True, slots=True)
 class BinMapper:
@@ -191,28 +191,7 @@ def fit_bin_mapper(X: Matrix, config: LiteLightGBMConfig) -> BinMapper:
         ("max_bin", config.max_bin),
         ("min_data_in_bin", config.min_data_in_bin),
     ):
-        try:
-            raw_value = np.asarray(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{name} must be an integer scalar") from exc
-        if raw_value.ndim != 0:
-            raise ValueError(f"{name} must be an integer scalar")
-        dtype = raw_value.dtype
-        if (
-            np.issubdtype(dtype, np.bool_)
-            or not np.issubdtype(dtype, np.number)
-            or np.issubdtype(dtype, np.complexfloating)
-        ):
-            raise ValueError(f"{name} must be an integer scalar")
-        try:
-            numeric_value = float(raw_value.item())
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(f"{name} must be an integer scalar") from exc
-        if not np.isfinite(numeric_value) or numeric_value != np.trunc(
-            numeric_value
-        ):
-            raise ValueError(f"{name} must be an integer scalar")
-        normalized_value = int(numeric_value)
+        normalized_value = _normalize_integer_scalar(value, name)
         if normalized_value < 1:
             raise ValueError(f"{name} must be positive")
         normalized_config[name] = normalized_value

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
@@ -10,6 +11,37 @@ import scipy.sparse as sp
 Matrix = np.ndarray | sp.spmatrix
 ClassWeight = str | dict[int, float] | None
 EPSILON = 1e-15
+
+
+def _normalize_integer_scalar(value: Any, name: str) -> int:
+    """Return an exact Python integer from one accepted real scalar."""
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer scalar") from exc
+    if raw.ndim != 0:
+        raise ValueError(f"{name} must be an integer scalar")
+    dtype = raw.dtype
+    if (
+        np.issubdtype(dtype, np.bool_)
+        or not np.issubdtype(dtype, np.number)
+        or np.issubdtype(dtype, np.complexfloating)
+    ):
+        raise ValueError(f"{name} must be an integer scalar")
+
+    item = raw.item()
+    if np.issubdtype(dtype, np.integer):
+        return int(item)
+    try:
+        if not np.isfinite(item) or item != np.trunc(item):
+            raise ValueError(f"{name} must be an integer scalar")
+        normalized = int(item)
+        round_trip = np.asarray(normalized, dtype=dtype).item()
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be an integer scalar") from exc
+    if round_trip != item:
+        raise ValueError(f"{name} must be exactly representable as an integer")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
