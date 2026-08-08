@@ -31,13 +31,49 @@ NOISE_FLOOR = 0.0084
 TEAM_NAME = "[TODO: registered Kaggle team name]"
 MEMBERS = ["Cliffton", "Brian", "Jovyan", "Koko", "Vincent"]
 
-# The shipped submission.
-BEST_FILE = "chosen_pergroup62_48.csv"
-BEST_KAGGLE = 0.80143
-BEST_SHARES = {"uuid": 0.6198, "numeric": 0.4756}
-BEST_CV_STANDARD = 0.8764
-BEST_CV_GROUPED = 0.8089
+# The shipped submission: LightGBM tuned on the raw-text features (notebook 17), cut
+# per id group at uuid 0.6198 / numeric 0.49.
+BEST_FILE = "tuned_lgbm_pergroup62_49.csv"
+BEST_KAGGLE = 0.81249
+BEST_SHARES = {"uuid": 0.6198, "numeric": 0.49}
+BEST_CV_STANDARD = 0.8849
+BEST_CV_GROUPED = 0.8135
 BEST_N_FEATURES = 40385
+
+# The same model one step along the numeric axis. Quoted throughout as the flanking
+# measurement, because 0.81249 and 0.81224 are 0.00025 apart on files that differ on 72
+# of 6,999 rows: 3% of NOISE_FLOOR, i.e. a tie. The report must not present the higher
+# number as a distinguishable best.
+BEST_FLANK_FILE = "tuned_lgbm_pergroup.csv"
+BEST_FLANK_KAGGLE = 0.81224
+BEST_FLANK_SHARES = {"uuid": 0.6198, "numeric": 0.4756}
+
+# The second final pick, chosen as a hedge rather than by score. Its 0.006 shortfall is
+# the measured price of not spending both picks on one leaderboard-fitted coordinate.
+HEDGE_FILE = "tuned_lgbm_pergroup62_51.csv"
+HEDGE_KAGGLE = 0.80641
+HEDGE_SHARES = {"uuid": 0.6198, "numeric": 0.512}
+
+# The 2x2 that separates model choice from share, both factors measured at both levels of
+# the other. Rows are (numeric share, defaults model, tuned model). The tuned edge
+# replicates at two independent share points: +0.01081 and +0.00592, mean +0.0084.
+MODEL_SHARE_2X2 = [
+    (0.4756, 0.80143, 0.81224),
+    (0.5120, 0.80049, 0.80641),
+]
+
+# Notebook 17's winner: the first search this project ran against the raw-text matrix
+# rather than the supplied 5,000 columns. Selected on five length bands by paired
+# per-fold difference, then confirmed on the three-band protocol it did not select on.
+BEST_PARAMS = {
+    "learning_rate": 0.04216, "n_estimators": 1093, "num_leaves": 130,
+    "max_depth": 8, "min_child_samples": 63, "colsample_bytree": 0.37775,
+    "subsample": 0.91803, "reg_alpha": 0.04681, "reg_lambda": 0.03735,
+}
+TUNING_PAIRED_GAIN = 0.0135          # paired mean over the 5 selection bands, +/- 0.0058
+TUNING_GAIN_STANDARD = 0.0085        # 0.8764 -> 0.8849, standard 5-fold
+TUNING_GAIN_GROUPED = 0.0046         # 0.8089 -> 0.8135, 3-band confirmation protocol
+TUNING_GAIN_KAGGLE = 0.01081         # 0.80143 -> 0.81224 at identical per-group shares
 
 # Reference points the narrative is measured against.
 SUPPLIED_LGBM_KAGGLE = 0.73583      # lightgbm_share50.csv, supplied features
@@ -99,7 +135,9 @@ MILESTONES = [
     ("Ablation-chosen feature set", 0.77942),
     ("uuid share corrected", 0.79706),
     ("uuid at its vertex", 0.80049),
-    ("Both groups at their vertices", BEST_KAGGLE),
+    ("Both groups calibrated", 0.80143),
+    ("Hyperparameters tuned on the new representation", BEST_FLANK_KAGGLE),
+    ("Numeric share moved one step", BEST_KAGGLE),
 ]
 
 
@@ -127,9 +165,31 @@ BRIEF_NOTES = [
     "the four Macro F1 scores.",
 ]
 
-# The brief and the repo disagree on the Task 1 filename. Neither file has been generated
-# yet, so this is live rather than historical.
+# The brief and the repo disagree on the Task 1 filename: brief slide 26 says the first,
+# Task.md says the second. Rather than guess which grader is right on an exact-name
+# deliverable worth 5 marks, both files ship with identical contents.
 TASK1_FILENAME_CONFLICT = ("LogReg_predictions.csv", "LogReg_Prediction.csv")
+TASK1_FILENAMES_BOTH_SHIPPED = True
+
+# Task 1, notebook 02. The rubric's top band asks for performance comparable to sklearn's
+# LogisticRegression, so the reference is holdout_metrics.csv's logreg_ridge on the same
+# features and the same locked split: 0.7392 against our 0.7288.
+TASK1_PARAMS = {"bs": 4, "epochs": 300, "lr": 0.1}
+TASK1_HOLDOUT_F1 = 0.7288
+TASK1_SKLEARN_REFERENCE = 0.7392
+TASK1_SUBMISSION_SHARE = 0.7231
+
+# Task 2, notebook 03. Test Macro F1 read back from Kaggle at each of the four graded
+# component counts, with the predicted machine share of each submission file. The share
+# column is what identifies the failure mode: it collapses far below the 0.3909 that
+# independent draws from the training prior would produce.
+PCA_KNN = [
+    (100, 0.1582, 0.5449, 0.67793),
+    (500, 0.3895, 0.3686, 0.66373),
+    (1000, 0.5643, 0.1767, 0.55923),
+    (2000, 0.7696, 0.0590, 0.41495),
+]
+PCA_KNN_TIE_FLOOR = 0.3909          # 0.6252 squared, both neighbours machine
 
 # The nine phases, in the order they happened. Each is one report section and at least one
 # slide. `decision` is the thing that phase settled; the report expands it into a
