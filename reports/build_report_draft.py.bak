@@ -147,9 +147,9 @@ def build():
         "through nine phases in order, and each one is written the same way: the options "
         "that were open to us at that point, the pros and cons of each, what we chose, and "
         "the tradeoff we knowingly accepted. Sections 2 to 10 are those nine phases and "
-        "together they answer the brief's roadmap question. Section 14 gathers the final "
-        "model in one place, section 15 covers the difficulties, section 16 what we "
-        "learned beyond the course, and section 17 the limitations we did not resolve."
+        "together they answer the brief's roadmap question. Section 11 gathers the final "
+        "model in one place, section 12 covers the difficulties, section 13 what we "
+        "learned beyond the course, and section 14 the limitations we did not resolve."
     )
     r.p(
         f"Our first submission, a tuned LightGBM on the supplied features with the "
@@ -163,32 +163,19 @@ def build():
         [["Move off the default cut to a global predicted share", "7", "+0.07845"],
          ["Rebuild the representation from raw text", "8", "+0.04359"],
          ["Threshold the two test populations separately", "9", "+0.02201"],
-         ["Retune the model on the new representation", "9",
-          f"{facts.TUNING_GAIN_KAGGLE:+.5f}"],
          ["Ensembling six models with four combiner families", "6", "+0.00171"],
-         ["Hyperparameter tuning on the supplied features", "5", "not measurable"]],
-        "Where the score came from. Roughly 65% of the total came from how scores are "
-        "turned into labels, 28% from what the model sees, and 7% from the model itself.",
+         ["Hyperparameter tuning", "5", "not measurable"]],
+        "Where the score came from. Roughly 70% of the total came from how scores are "
+        "turned into labels, 30% from what the model sees, and nothing measurable from "
+        "the model itself.",
         widths=[3.2, 0.8, 2.1],
     )
     r.p(
         "That ordering is the honest summary of the project and it is not the one we "
-        "expected. The two phases that moved the score most were the ones that questioned "
-        "the decision rule and the input, not the ones that worked on the model."
-    )
-    r.p(
-        "The last two rows of that table are the same activity with opposite results, and "
-        "the difference between them is the single most useful thing we learned. Tuning "
-        "the model on the supplied 5,000 features returned nothing the leaderboard could "
-        "resolve, and for most of the project we generalised that into a belief that the "
-        "model did not matter on this task. Running the identical search against the "
-        "raw-text representation we had since moved to returned "
-        f"{facts.TUNING_GAIN_KAGGLE:+.5f}, comfortably outside the noise floor. The "
-        "lesson is not that tuning works or does not work, but that a null result is "
-        "attached to the representation it was measured on and does not travel to a "
-        "different one. We had carried ours across a representation change without "
-        f"rechecking it, and it cost us {facts.TUNING_GAIN_KAGGLE:.5f} until the final "
-        "week."
+        "expected. Two full phases spent on the model, tuning and ensembling, returned "
+        "gains at or below what the leaderboard can resolve, and we report them as the "
+        "nulls they were rather than dressing them up. The two phases that worked were "
+        "the ones that questioned the decision rule and the input."
     )
     r.p(
         "One number governs every judgement below. On roughly 3,570 scored public rows at "
@@ -202,7 +189,7 @@ def build():
              "moved the score.", width=6.3)
 
     # ------------------------------------------------------------------ 2
-    r.h("2. Phase 1: Exploratory Data Analysis")
+    r.h("2. Phase 1: understand the data before modelling it")
     r.p(
         "No model was trained until we had measured the dataset. That was a deliberate "
         "sequencing choice, and three of the four measurements went on to constrain a "
@@ -273,10 +260,10 @@ def build():
     r.figure("text_length_distribution.png",
              "Document length by class. Length does not separate the classes on its own, "
              "but it correlates with the label strongly enough that it later became the "
-             "basis of our transfer-validation protocol in section 15.2.", width=5.8)
+             "basis of our transfer-validation protocol in section 12.2.", width=5.8)
 
     # ------------------------------------------------------------------ 3
-    r.h("3. Phase 2: Dimensionality Reduction")
+    r.h("3. Phase 2: dimensionality reduction")
     r.p(
         "With 5,000 columns over 20,000 rows the obvious next question is whether the "
         "space can be compressed. The brief also requires it: Task 2 fixes a PCA plus "
@@ -284,8 +271,106 @@ def build():
         "task and the modelling question as one investigation."
     )
 
+    r.h("3.1 Task 1 deliverable: logistic regression from scratch", level=2)
+    r.p(
+        "Before either, notebook 02 implements logistic regression by hand, with no "
+        "pre-built logistic regression package anywhere in the path, as the brief requires "
+        "on pain of scoring zero. The implementation is the standard five pieces: a "
+        "numerically stable sigmoid that branches on the sign of its input to avoid "
+        "overflow, log loss, an analytic gradient, mini-batch gradient descent, and a "
+        "predict step. The gradient of log loss with respect to the weights reduces to the "
+        "transpose of the design matrix times the residual, divided by the batch size, so "
+        "no numerical differentiation is needed and the whole training loop is a few lines "
+        "of NumPy."
+    )
+    r.p(
+        "Beyond satisfying the task, this was our reference point: it told us what a "
+        "linear model on the supplied features can do, which is most of what the tuned "
+        "linear models later achieved. The brief's top band asks for performance "
+        "comparable to sklearn's implementation, so that comparison is the thing to report."
+    )
+    r.todo("batch size, epochs and learning rate used, the validation Macro F1, and the "
+           "same figure from sklearn's LogisticRegression for the side-by-side comparison "
+           "the rubric asks for")
+    r.todo("the prediction file. The course brief slide names it LogReg_predictions.csv "
+           "while the written task sheet names it LogReg_Prediction.csv. Confirm the "
+           "spelling against the Kaggle submission page before generating it, since the "
+           "file does not exist yet")
+
+    r.h("3.2 Task 2 deliverable: PCA and KNN at four component counts", level=2)
+    r.p(
+        "PCA at 2,000, 1,000, 500 and 100 components, each feeding a KNN classifier with "
+        "n_neighbors fixed at 2. The component counts are set by the task, so this is the "
+        "one place in the project where we did not choose a structural hyperparameter from "
+        "a diagnostic. We still produced the diagnostic, because it explains the results."
+    )
+    r.table(
+        ["Components", "Cumulative explained variance"],
+        [[f"{n:,}", f"{v:.1%}"] for n, v in facts.PCA_VARIANCE],
+        "Variance retained at Task 2's four fixed counts, measured in notebook 01.",
+        widths=[1.6, 2.6],
+    )
+    r.p(
+        "The analysis the rubric asks for is in that table. This matrix resists "
+        "compression badly. Two thousand components, 40% of the original width, still "
+        f"leave {1 - facts.PCA_VARIANCE[0][1]:.0%} of the variance behind, and none of the "
+        "canonical 80%, 90%, 95% or 99% thresholds is reached within 2,000 components at "
+        f"all. The knee of the cumulative curve sits at {facts.PCA_ELBOW[0]} components, "
+        f"which retains only {facts.PCA_ELBOW[1]:.1%}. The reason is visible in phase 1: "
+        "with 98.64% zeros and about 68 active columns per document, there is very little "
+        "shared linear structure for a few directions to absorb. Variance is spread almost "
+        "evenly across a very large number of directions, which is exactly the regime in "
+        "which PCA has nothing to exploit."
+    )
+    r.p(
+        "That also predicts the KNN result. Reducing to 100 components throws away 84% of "
+        "the variance, and KNN then measures Euclidean distance in a space where most of "
+        "what distinguished the documents has been discarded. Neighbourhoods in a sparse "
+        "high-dimensional space are weakly defined to begin with, which is why KNN came "
+        "tenth of twelve in phase 4 even at full width."
+    )
+    r.figure("scree_plot.png",
+             "Per-component and cumulative explained variance. The curve has no sharp "
+             "knee, which is the signature of a matrix that does not compress.", width=6.0)
+    r.todo("the four test Macro F1 scores read back from Kaggle at 2000, 1000, 500 and "
+           "100 components, which is the graded deliverable for Task 2")
+
+    r.h("3.3 The decision this phase settled for Task 3", level=2)
+    r.considered(
+        [
+            ["PCA before every Task 3 model",
+             "Smaller, denser matrices; faster fits; standard practice on wide data",
+             "Only 77% of variance survives even at 2,000 components; destroys the "
+             "sparsity that tree and Naive Bayes models exploit"],
+            ["TruncatedSVD, the sparse-friendly variant",
+             "Does not densify the matrix, so it is the right tool for TF-IDF",
+             "Same information loss; adds a component count to tune with no evidence it "
+             "buys anything"],
+            ["Feature selection by chi-squared or mutual information",
+             "Keeps original interpretable columns; cheap",
+             "Nothing to remove: no column is all-zero or near-constant"],
+            ["No reduction for Task 3",
+             "Nothing discarded; boosted trees handle 5,000 sparse columns natively",
+             "Slower fits; no defence if a later model turns out to need dense input"],
+        ],
+        "Dimensionality reduction options for the Task 3 models.",
+    )
+    r.decision(
+        chose="no dimensionality reduction for any Task 3 model. PCA appears only where "
+              "Task 2 requires it.",
+        tradeoff="we gave up faster fits and the option of distance-based and "
+                 "dense-input models, and we carried 5,000 columns into every experiment "
+                 "when a compressed representation would have been cheaper to iterate on.",
+        because="the scree curve says compression here is lossy rather than efficient. "
+                "There is no elbow to exploit, so any component count is a straight trade "
+                "of information for speed. The models that led our baselines were boosted "
+                "trees, which take sparse input directly and select features internally as "
+                "they split, so the compression would have cost accuracy to buy speed we "
+                "did not need.",
+    )
+
     # ------------------------------------------------------------------ 4
-    r.h("4. Phase 3: Choosing the Validation Strategy")
+    r.h("4. Phase 3: lock the validation protocol")
     r.p(
         "Phase 1 said the classes are skewed, so this phase turned that measurement into a "
         "protocol and then froze it. The reasoning runs directly from the class balance: "
@@ -330,175 +415,8 @@ def build():
                 "this one could answer both.",
     )
 
-    r.h("5. Task 1: Logistic Regression from Scratch")
-    r.p(
-        "Before either, notebook 02 implements logistic regression by hand, with no "
-        "pre-built logistic regression package anywhere in the path, as the brief requires "
-        "on pain of scoring zero. The implementation is the standard five pieces: a "
-        "numerically stable sigmoid that branches on the sign of its input to avoid "
-        "overflow, log loss, an analytic gradient, mini-batch gradient descent, and a "
-        "predict step. The gradient of log loss with respect to the weights reduces to the "
-        "transpose of the design matrix times the residual, divided by the batch size, so "
-        "no numerical differentiation is needed and the whole training loop is a few lines "
-        "of NumPy."
-    )
-    r.p(
-        "Beyond satisfying the task, this was our reference point: it told us what a "
-        "linear model on the supplied features can do, which is most of what the tuned "
-        "linear models later achieved. The brief's top band asks for performance "
-        "comparable to sklearn's implementation, so that comparison is the thing to report."
-    )
-    r.table(
-        ["Setting", "Value"],
-        [["Batch size", f"{facts.TASK1_PARAMS['bs']}"],
-         ["Epochs", f"{facts.TASK1_PARAMS['epochs']}"],
-         ["Learning rate", f"{facts.TASK1_PARAMS['lr']}"],
-         ["Macro F1, held-out 4,000 rows", f"{facts.TASK1_HOLDOUT_F1:.4f}"],
-         ["sklearn LogisticRegression, same split",
-          f"{facts.TASK1_SKLEARN_REFERENCE:.4f}"]],
-        "Our from-scratch implementation against sklearn's, on the same locked split and "
-        "the same supplied features. The gap is "
-        f"{facts.TASK1_SKLEARN_REFERENCE - facts.TASK1_HOLDOUT_F1:.4f}.",
-        widths=[3.0, 1.6],
-    )
-    r.p(
-        f"The {facts.TASK1_SKLEARN_REFERENCE - facts.TASK1_HOLDOUT_F1:.4f} shortfall is "
-        "not a defect in the gradient or the loss, both of which we checked against "
-        "numerical differentiation. It is that plain mini-batch gradient descent is still "
-        "descending when we stop it: the training loss was falling by roughly 0.00002 per "
-        "epoch over the final ten epochs, so the optimiser had not converged, while "
-        "sklearn's solver runs to a convergence tolerance and adds L2 regularisation by "
-        "default. Longer training or a learning-rate schedule would close most of the "
-        "remaining gap; we report the honest number rather than tuning the from-scratch "
-        "model until it matched."
-    )
-    r.p(
-        "Both filenames ship.", bold=True
-    )
-    r.p(
-        f"The course brief slide names the prediction file {facts.TASK1_FILENAME_CONFLICT[0]} "
-        f"while the written task sheet names it {facts.TASK1_FILENAME_CONFLICT[1]}. We "
-        "could not resolve which the grader uses, so rather than guess on an exact-name "
-        "deliverable we wrote both files with identical contents. The predicted machine "
-        f"share is {facts.TASK1_SUBMISSION_SHARE:.2%}, well above the roughly 53% the test "
-        "set appears to carry, because Task 1 is graded on the implementation rather than "
-        "on leaderboard score and we deliberately left the model at its natural 0.5 cut "
-        "rather than importing the calibration work from phase 7."
-    )
-
-    r.h("6. Task 2: PCA and KNN at four component counts")
-    r.p(
-        "PCA at 2,000, 1,000, 500 and 100 components, each feeding a KNN classifier with "
-        "n_neighbors fixed at 2. The component counts are set by the task, so this is the "
-        "one place in the project where we did not choose a structural hyperparameter from "
-        "a diagnostic. We still produced the diagnostic, because it explains the results."
-    )
-    r.table(
-        ["Components", "Cumulative explained variance"],
-        [[f"{n:,}", f"{v:.1%}"] for n, v in facts.PCA_VARIANCE],
-        "Variance retained at Task 2's four fixed counts, measured in notebook 01.",
-        widths=[1.6, 2.6],
-    )
-    r.p(
-        "The analysis the rubric asks for is in that table. This matrix resists "
-        "compression badly. Two thousand components, 40% of the original width, still "
-        f"leave {1 - facts.PCA_VARIANCE[0][1]:.0%} of the variance behind, and none of the "
-        "canonical 80%, 90%, 95% or 99% thresholds is reached within 2,000 components at "
-        f"all. The knee of the cumulative curve sits at {facts.PCA_ELBOW[0]} components, "
-        f"which retains only {facts.PCA_ELBOW[1]:.1%}. The reason is visible in phase 1: "
-        "with 98.64% zeros and about 68 active columns per document, there is very little "
-        "shared linear structure for a few directions to absorb. Variance is spread almost "
-        "evenly across a very large number of directions, which is exactly the regime in "
-        "which PCA has nothing to exploit."
-    )
-    r.figure("scree_plot.png",
-             "Per-component and cumulative explained variance. The curve has no sharp "
-             "knee, which is the signature of a matrix that does not compress.", width=6.0)
-    r.table(
-        ["Components", "Cumulative variance", "Predicted machine share", "Kaggle Macro F1"],
-        [[f"{n:,}", f"{v:.2%}", f"{s:.4f}", f"{f:.5f}"] for n, v, s, f in facts.PCA_KNN],
-        "The graded Task 2 deliverable: test Macro F1 at each of the four required "
-        "component counts, with the predicted class balance of each submission.",
-        widths=[1.2, 1.6, 1.7, 1.5],
-    )
-    r.p(
-        "Keeping more variance made the classifier monotonically worse, which is the "
-        "opposite of what we expected before running it. The best score came from the most "
-        "aggressive reduction, 100 components, holding under a sixth of the variance."
-    )
-    r.p(
-        "Two mechanisms compound. The first is distance concentration: as dimension grows, "
-        "the nearest and farthest neighbour distances converge, and it is exactly the "
-        "contrast between them that KNN treats as similarity. Because a component's "
-        "contribution to squared distance scales with its variance, and there are so many "
-        "tail components, at 2,000 components roughly 79% of the squared distance comes "
-        "from directions outside the leading 100. Euclidean distance cannot down-weight "
-        "them, so the extra directions do not add information so much as dilute it."
-    )
-    r.p(
-        "The second is the tie-break, and it is the larger effect. With n_neighbors=2 and "
-        "two classes the neighbours can split one-one; sklearn resolves ties by lowest "
-        "class index, which here is human. The model therefore predicts machine only when "
-        "both neighbours are machine, so any degradation in retrieval is squared. The "
-        "share column measures the damage. Had degraded retrieval simply made the two "
-        "neighbours behave like independent draws from the 62.52% training prior, the "
-        f"share would fall towards {facts.PCA_KNN_TIE_FLOOR} and stop, since that value is "
-        "a floor under that account. The observed share at 2,000 components is "
-        f"{facts.PCA_KNN[-1][2]}, which is {facts.PCA_KNN_TIE_FLOOR - facts.PCA_KNN[-1][2]:.4f} "
-        "below the floor, so the neighbours are not random draws: they are systematically "
-        "human. Backing out the per-neighbour machine rate as the square root of the share "
-        "gives 0.738, 0.607, 0.420 and 0.243 across the four counts, against a prior of "
-        "0.6252 that it should have matched at every count."
-    )
-    r.p(
-        "The standard explanation for that shape is hubness: in high dimension a small "
-        "number of training points become the nearest neighbour of disproportionately many "
-        "queries. If those hubs skew human, most queries retrieve at least one human "
-        "neighbour, the tie fires, and the prediction collapses to human. We did not "
-        "measure the k-occurrence distribution, so we report hubness as the leading "
-        "explanation rather than a demonstrated one. The practical conclusion does not "
-        "depend on which mechanism dominates: the failure is as much the fixed k=2 "
-        "tie-break as the dimensionality, and k=3 or distance weighting would break ties "
-        "on evidence instead of class index. Both are outside the task's fixed "
-        "specification, which is why we report it rather than change it."
-    )
-
-    r.h("7. Decision carried forward for Task 3")
-    r.considered(
-        [
-            ["PCA before every Task 3 model",
-             "Smaller, denser matrices; faster fits; standard practice on wide data",
-             "Only 77% of variance survives even at 2,000 components; destroys the "
-             "sparsity that tree and Naive Bayes models exploit"],
-            ["TruncatedSVD, the sparse-friendly variant",
-             "Does not densify the matrix, so it is the right tool for TF-IDF",
-             "Same information loss; adds a component count to tune with no evidence it "
-             "buys anything"],
-            ["Feature selection by chi-squared or mutual information",
-             "Keeps original interpretable columns; cheap",
-             "Nothing to remove: no column is all-zero or near-constant"],
-            ["No reduction for Task 3",
-             "Nothing discarded; boosted trees handle 5,000 sparse columns natively",
-             "Slower fits; no defence if a later model turns out to need dense input"],
-        ],
-        "Dimensionality reduction options for the Task 3 models.",
-    )
-    r.decision(
-        chose="no dimensionality reduction for any Task 3 model. PCA appears only where "
-              "Task 2 requires it.",
-        tradeoff="we gave up faster fits and the option of distance-based and "
-                 "dense-input models, and we carried 5,000 columns into every experiment "
-                 "when a compressed representation would have been cheaper to iterate on.",
-        because="the scree curve says compression here is lossy rather than efficient. "
-                "There is no elbow to exploit, so any component count is a straight trade "
-                "of information for speed. The models that led our baselines were boosted "
-                "trees, which take sparse input directly and select features internally as "
-                "they split, so the compression would have cost accuracy to buy speed we "
-                "did not need.",
-    )
-
-    # ------------------------------------------------------------------ 8
-    r.h("8. Phase 4: Baselines before Tuning")
+    # ------------------------------------------------------------------ 5
+    r.h("5. Phase 4: baselines before any tuning")
     r.p(
         "The next decision was where to spend tuning effort, and we refused to make it by "
         "reputation. Twelve model families were run at their library defaults under the "
@@ -552,8 +470,8 @@ def build():
              "The baseline sweep. LightGBM led, and it kept leading once we learned to "
              "compare models fairly in phase 7.", width=5.8)
 
-    # ------------------------------------------------------------------ 9
-    r.h("9. Phase 5: Tuning")
+    # ------------------------------------------------------------------ 6
+    r.h("6. Phase 5: tuning, and a first leaderboard result that went badly")
     r.p(
         "Five families were tuned with the same two-stage protocol: a coarse randomised "
         "search over a wide space, then a focused grid around the winner. Search spaces "
@@ -584,7 +502,7 @@ def build():
         "set, and accepted the second reading. What we did not spot for another two phases "
         "was that we were also comparing models at different predicted class balances, "
         "which made the leaderboard look anti-correlated with local validation when it was "
-        "not. Section 15.1 covers that."
+        "not. Section 12.1 covers that."
     )
     r.considered(
         [
@@ -629,8 +547,8 @@ def build():
              "leaderboard by less than 0.01, which was the first sign that the decision "
              "rule needed a different kind of evidence.", width=5.4)
 
-    # ------------------------------------------------------------------ 10
-    r.h("10. Phase 6: Exploring Ensembling Methods")
+    # ------------------------------------------------------------------ 7
+    r.h("7. Phase 6: ensembling, and an honest null")
     r.p(
         "With one model tuned and the gap unexplained, the standard next move is to "
         "combine models. The baseline table supported it: boosted trees and linear models "
@@ -694,8 +612,8 @@ def build():
              "the best and the single model is smaller than the leaderboard can measure.",
              width=5.8)
 
-    # ------------------------------------------------------------------ 11
-    r.h("11. Phase 7: Threshold Calibration")
+    # ------------------------------------------------------------------ 8
+    r.h("8. Phase 7: threshold calibration")
     r.p(
         "If the model was not the constraint, the next candidate was the decision rule. A "
         "classifier emits a probability; turning it into a label needs a cut, and we had "
@@ -784,8 +702,8 @@ def build():
              "the time as share being exhausted. Phase 9 shows why that reading was wrong.",
              width=5.4)
 
-    # ------------------------------------------------------------------ 12
-    r.h("12. Phase 8: Pivot to raw-text features")
+    # ------------------------------------------------------------------ 9
+    r.h("9. Phase 8: the pivot to raw-text features")
     r.p(
         "We were now stuck for a different reason. Tuning had gained 0.005 locally and "
         "little on the leaderboard, ensembling had gained 0.0017, and calibration, which "
@@ -861,9 +779,9 @@ def build():
     r.p(
         "Readability contributed nothing and the supplied TF-IDF was actively harmful, "
         "costing 0.0074 of held-out-domain Macro F1 by being present. Both were dropped, "
-        f"leaving the {facts.BEST_N_FEATURES:,}-column set in section 14. Note also that "
+        f"leaving the {facts.BEST_N_FEATURES:,}-column set in section 11. Note also that "
         "the diversity block returns more than character n-grams from five columns against "
-        "20,000, which is what prompted the expansion attempt reported in section 15.4."
+        "20,000, which is what prompted the expansion attempt reported in section 12.4."
     )
     r.considered(
         [
@@ -900,7 +818,7 @@ def build():
                 "deletes function words, punctuation, casing and layout, and those are "
                 "precisely the properties that survive a corpus change, which the ablation "
                 "then confirmed family by family. The brief permits own preprocessing "
-                "provided it is described in full, and this section plus section 14 is "
+                "provided it is described in full, and this section plus section 11 is "
                 "that description.",
     )
     r.figure("representation_comparison.png",
@@ -908,8 +826,8 @@ def build():
              "session. Every dense block scores below the control alone; together they "
              "beat it by 0.115.", width=6.0)
 
-    # ------------------------------------------------------------------ 13
-    r.h("13. Phase 9: Calibration per group")
+    # ------------------------------------------------------------------ 10
+    r.h("10. Phase 9: calibration revisited, per group")
     r.p(
         "With the representation settled we returned to the decision rule, and found the "
         "most useful result in the project sitting in a measurement we had already taken "
@@ -988,57 +906,34 @@ def build():
              "The per-group share surface. Both axes are at their fitted vertices, and the "
              "numeric axis is asymmetric.", width=6.0)
 
-    r.h("13.1 Hyperparameters on new feature representation", level=2)
+    r.h("10.1 Hyperparameters on the new representation", level=2)
     r.p(
-        "Every hyperparameter search up to this point had run against the supplied 5,000 "
-        f"features. Nothing had been tuned on the {facts.BEST_N_FEATURES:,}-column "
-        "raw-text matrix, which is a different problem in shape: eight times wider, "
-        "sparser, and three quarters character n-grams. This phase closed that gap, and "
-        "it is the one place in the project where work on the model itself paid."
-    )
-    r.p(
-        "The search was split five ways across the team over 400 seeded configurations, "
-        "sampling learning rate, tree count, leaf count, depth, minimum child samples, "
-        "column and row subsampling and both regularisation terms, followed by a second "
-        "stage refined around the centroid of the configurations that passed. It selects "
-        "on paired per-fold differences against the default configuration rather than on "
-        "raw means, because the five length bands differ in difficulty by far more than "
-        "any two configurations differ from each other, and that difficulty is common to "
-        "every configuration so it cancels in a paired difference. A candidate had to "
-        "improve on every one of the five folds to pass."
-    )
-    r.table(
-        ["Hyperparameter", "Value"],
-        [[k, f"{v:g}"] for k, v in facts.BEST_PARAMS.items()],
-        "The winning configuration. class_weight=\"balanced\", random_state=42 and "
-        "subsample_freq=1 are fixed throughout and are not part of the search space.",
-        widths=[2.6, 1.4],
+        "One thread is still open and we report it as open. Every hyperparameter search in "
+        "this project ran against the supplied 5,000 features. Nothing has been tuned on "
+        f"the {facts.BEST_N_FEATURES:,}-column raw-text matrix, which is a different "
+        "problem in shape: eight times wider, sparser, and three quarters character "
+        "n-grams. The shipped model therefore runs on LightGBM defaults with only "
+        "class_weight set."
     )
     r.p(
-        f"It won by {facts.TUNING_PAIRED_GAIN:+.4f} paired Macro F1 over the defaults on "
-        "the selection protocol, better on five folds out of five. Because a search "
-        "optimises the protocol it selects on, that number is optimistic by construction, "
-        "so we confirmed it on two measurements the search never saw: standard five-fold "
-        f"cross-validation ({facts.TUNING_GAIN_STANDARD:+.4f}) and the three-band grouped "
-        f"protocol ({facts.TUNING_GAIN_GROUPED:+.4f}). Both agree in sign, so the gain is "
-        "not an artifact of the folds it was fitted to."
+        "The search is designed and split five ways across the team over 400 seeded "
+        "configurations, sampling learning rate, tree count, leaf count, depth, minimum "
+        "child samples, column and row subsampling and both regularisation terms. It "
+        "selects on paired per-fold differences against the default configuration rather "
+        "than on raw means, requires a candidate to improve on every fold, and confirms "
+        "the winner on a protocol the search never selected on. Based on the equivalent "
+        "search on the supplied features, we expect it to be worth about 0.005."
     )
-    r.p(
-        f"On the leaderboard it was worth {facts.TUNING_GAIN_KAGGLE:+.5f}, measured "
-        "against the previous submission at identical per-group shares so that the "
-        "hyperparameters were the only thing that moved. That single number revises this "
-        "report's own headline, and section 1 says how: the identical search on the "
-        "supplied features had returned nothing, and we had wrongly carried that null "
-        "across a change of representation."
-    )
+    r.todo("result of the notebook 17 hyperparameter search once the team has run it, "
+           "including the winning configuration and its paired per-fold margin")
 
-    # ------------------------------------------------------------------ 14
-    r.h("14. Final model & Conclusion")
+    # ------------------------------------------------------------------ 11
+    r.h("11. The final model, end to end")
     r.p(
         "This section answers the brief's first question in one place, gathering what the "
         "nine phases arrived at."
     )
-    r.h("14.1 Classifier", level=2)
+    r.h("11.1 The classifier", level=2)
     r.p(
         "LightGBM is a gradient-boosted decision tree ensemble. It fits trees in sequence, "
         "each trained on the gradient of the loss left over by the trees before it, so "
@@ -1051,17 +946,10 @@ def build():
     )
     r.p(
         "We pass class_weight=\"balanced\" so the 62/38 split does not let the minority "
-        "human class be outvoted. The remaining hyperparameters come from the two-stage "
-        "search in section 13.1 and are listed there; the shape of the winner is a slow "
-        f"learning rate of {facts.BEST_PARAMS['learning_rate']} over "
-        f"{facts.BEST_PARAMS['n_estimators']:,} trees, with each tree seeing about "
-        f"{facts.BEST_PARAMS['colsample_bytree']:.0%} of the columns. That column "
-        "subsampling is the knob that matters most here: with three quarters of the "
-        "matrix being character n-grams, most columns in any given split are close to "
-        "redundant, and forcing each tree onto a different third of them is what buys "
-        "the diversity the ensemble is built from."
+        "human class be outvoted. Every other hyperparameter is at its default, for the "
+        "reason given in section 10.1."
     )
-    r.h("14.2 Features", level=2)
+    r.h("11.2 The features", level=2)
     r.table(
         ["Block", "Columns", "What it measures"],
         [[n, f"{c:,}", d] for n, c, d in facts.CHOSEN_BLOCKS],
@@ -1070,7 +958,7 @@ def build():
         "training text alone.",
         widths=[1.5, 0.9, 3.7],
     )
-    r.h("14.3 Decision Rule", level=2)
+    r.h("11.3 The decision rule", level=2)
     r.p(
         "The model emits a probability per row. We sort the rows by that probability and "
         f"label the top {facts.BEST_SHARES['uuid']:.2%} of the UUID rows and the top "
@@ -1078,7 +966,7 @@ def build():
         "exact count rather than a quantile so the realised share matches the target on "
         "ties."
     )
-    r.h("14.4 Scores on Kaggle", level=2)
+    r.h("11.4 What it scores", level=2)
     r.table(
         ["Measurement", "Macro F1"],
         [["Stratified 5-fold cross-validation", f"{facts.BEST_CV_STANDARD:.4f}"],
@@ -1086,7 +974,7 @@ def build():
           f"{facts.BEST_CV_GROUPED:.4f}"],
          ["Kaggle public leaderboard", f"{facts.BEST_KAGGLE:.5f}"]],
         "The same model measured three ways. The spread between them is the subject of "
-        "section 15.2.",
+        "section 12.2.",
         widths=[3.4, 1.7],
     )
     r.figure("kaggle_journey.png",
@@ -1095,14 +983,14 @@ def build():
              "calibration, the representation change, and the first per-group correction. "
              "Everything flat is a phase spent on the model.")
 
-    # ------------------------------------------------------------------ 15
-    r.h("15. Difficulties")
+    # ------------------------------------------------------------------ 12
+    r.h("12. Difficulties, and what each one cost")
     r.p(
         "Every item here is a mistake we made and then caught. The cost is included "
         "because the cost is the part that taught us something.", italic=True
     )
 
-    r.h("15.1 We compared models along an axis we had not held fixed", level=2)
+    r.h("12.1 We compared models along an axis we had not held fixed", level=2)
     r.p(
         "For three notebooks we believed local validation was anti-correlated with the "
         "leaderboard. LightGBM had the best cross-validation and holdout scores of "
@@ -1110,7 +998,7 @@ def build():
         "phase on linear models instead."
     )
     r.p(
-        "The inversion was an artifact of the confound described in section 11. Once we "
+        "The inversion was an artifact of the confound described in section 8. Once we "
         "re-tested at a matched predicted share, LightGBM beat ElasticNet by 0.0189, in "
         "the same direction and roughly the same magnitude as its local lead. What fixed "
         "it was designing a test that could overturn our own written conclusion, and "
@@ -1118,7 +1006,7 @@ def build():
         "for the rest of the project, and it caught two more errors."
     )
 
-    r.h("15.2 A validation protocol that would not reproduce", level=2)
+    r.h("12.2 A validation protocol that would not reproduce", level=2)
     r.p(
         "Once transfer became the question, stratified cross-validation was no longer "
         "enough, because it trains and tests within the same corpora. We built domain "
@@ -1153,7 +1041,7 @@ def build():
              "three milestone models. Grouped validation is not unbiased, but its error is "
              "several times smaller.")
 
-    r.h("15.3 A diagnostic that silently contaminated itself", level=2)
+    r.h("12.3 A diagnostic that silently contaminated itself", level=2)
     r.p(
         "We built a submission to test whether the public leaderboard scores the UUID "
         "rows, by changing only those rows and holding the numeric rows fixed. The first "
@@ -1169,7 +1057,7 @@ def build():
         "is byte-identical rather than trusting the share to imply it."
     )
 
-    r.h("15.4 Two predictions we made, and both were wrong", level=2)
+    r.h("12.4 Two predictions we made, and both were wrong", level=2)
     r.p(
         "We predicted that the formatting features were dataset fingerprints that would "
         "not survive the corpus change, since machine text in training carries markdown "
@@ -1198,7 +1086,7 @@ def build():
         "idea worked."
     )
 
-    r.h("15.5 What we could not overcome", level=2)
+    r.h("12.5 What we could not overcome", level=2)
     r.bullets([
         "Predicted share cannot be validated locally at all. Our dev and holdout splits "
         "are carved from training data and inherit its class balance, so every share "
@@ -1211,9 +1099,9 @@ def build():
         "closed it without fitting the public rows.",
     ])
 
-    # ------------------------------------------------------------------ 16
-    r.h("16. What we learned beyond the course")
-    r.h("16.1 Averaging can hide two large effects that cancel", level=2)
+    # ------------------------------------------------------------------ 13
+    r.h("13. What we learned beyond the course")
+    r.h("13.1 Averaging can hide two large effects that cancel", level=2)
     r.p(
         "This is the idea that generalises furthest beyond this project. When one global "
         "threshold is applied to a population that is a mixture, the optimum for the "
@@ -1223,7 +1111,7 @@ def build():
         "a roughly -0.019 effect had been cancelling in the average, and the only way to "
         "see it was to stop averaging."
     )
-    r.h("16.2 Blocked and paired comparison", level=2)
+    r.h("13.2 Blocked and paired comparison", level=2)
     r.p(
         "Our held-out bands differ in difficulty by far more than any two candidates "
         "differ from each other. Comparing mean scores against a fold standard deviation "
@@ -1233,17 +1121,17 @@ def build():
         "over-conservative bar before we understood this, and we say so rather than "
         "quietly restating it."
     )
-    r.h("16.3 Leave-one-group-out validation as a transfer proxy", level=2)
+    r.h("13.3 Leave-one-group-out validation as a transfer proxy", level=2)
     r.p(
         "Standard cross-validation answers how well a model fits this data. When train and "
         "test come from different sources, the question is how well it transfers, and "
         "those are different measurements. Holding out a whole group and training on the "
         "rest approximates the second. The essential companion is the random-grouping "
-        "control in section 15.2: without it, a lower score under grouping is equally "
+        "control in section 12.2: without it, a lower score under grouping is equally "
         "consistent with the protocol simply training on fewer rows, and the whole "
         "apparatus proves nothing."
     )
-    r.h("16.4 A leaderboard is a measuring instrument with a precision", level=2)
+    r.h("13.4 A leaderboard is a measuring instrument with a precision", level=2)
     r.p(
         f"We computed the sampling noise of the public leaderboard once, about "
         f"{facts.NOISE_FLOOR} at our row count and score, and then held every claim to it. "
@@ -1251,7 +1139,7 @@ def build():
         "of our own gains, and avoid spending rationed submissions inside flat regions. It "
         "is also why our final picks are not simply the top two public scores."
     )
-    r.h("16.5 Reading the dataset paper was worth more than any model", level=2)
+    r.h("13.5 Reading the dataset paper was worth more than any model", level=2)
     r.p(
         "The shared-task paper told us the test corpora were disjoint from training, gave "
         "the class balance of each, and explained why the test file contains two "
@@ -1261,14 +1149,14 @@ def build():
         "time."
     )
 
-    # ------------------------------------------------------------------ 17
-    r.h("17. Limitations and next steps")
+    # ------------------------------------------------------------------ 14
+    r.h("14. Limitations and next steps")
     r.p("What we consider settled:", bold=True)
     r.bullets([
         "The representation. Raw-text features beat the supplied TF-IDF by a wide margin, "
         "and adding the supplied features back changes nothing measurable.",
         "Global predicted share. Flat from 0.44 to 0.56 on two different models, for the "
-        "reason section 16.1 explains.",
+        "reason section 13.1 explains.",
         "Per-group share. Both axes walked to their vertices.",
         "Feature expansion in the directions we tried. Four ideas, all inside the bar.",
     ])
