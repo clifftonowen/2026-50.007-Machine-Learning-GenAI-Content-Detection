@@ -93,20 +93,26 @@ short carry-forward note saying what it hands to the next.
 | Notebook | Task |
 |---|---|
 | `notebooks/01_eda.ipynb` | class balance, sparsity, intrinsic dimensionality; builds & saves the locked train/holdout split |
-| `notebooks/02_logreg_from_scratch.ipynb` | **Task 1** — LogReg from scratch → `submissions/LogReg_Prediction.csv` |
+| `notebooks/02_logreg_from_scratch.ipynb` | **Task 1** — LogReg from scratch → `submissions/LogReg_predictions.csv` |
 | `notebooks/03_pca_knn.ipynb` | **Task 2** — PCA + KNN(n=2) at 2000/1000/500/100 components |
-| `notebooks/04_models.ipynb` | **Task 3** — classical-ML model exploration (no deep learning / no LLMs) |
-| `notebooks/05_tuning.ipynb` | **Task 3** — two-stage hyperparameter search |
-| `notebooks/06_holdout.ipynb` | **Task 3** — final holdout eval + submission CSV |
-| `notebooks/18_sparse_linear.ipynb` | **Task 3** — fold-fitted char/word TF-IDF with LinearSVC, LogReg and NB-SVM |
-| `notebooks/19_rawtext_ensemble.ipynb` | **Task 3** — OOF rank blend of tuned raw-text LightGBM and the confirmed linear model |
-| `notebooks/20_domain_adaptation.ipynb` | **Task 3** — adversarial validation, gated importance weighting and corrected clustering |
+| `notebooks/04_models.ipynb` | **Task 3** — twelve classical-ML baselines (no deep learning / no LLMs) |
+| `notebooks/05_tuning.ipynb` | **Task 3** — two-stage hyperparameter search; `05b`–`05f` are the per-model searches |
+| `notebooks/06_holdout.ipynb` | **Task 3** — holdout eval of the tuned models; `06b`–`06d` per model |
+| `notebooks/07_linear_ensemble.ipynb`, `10_stacked_ensemble.ipynb` | **Task 3** — ensembling, four combiner families |
+| `notebooks/08_calibration.ipynb`, `09_share_matched_comparison.ipynb`, `11_group_share.ipynb`, `16_share_surface.ipynb` | **Task 3** — the decision rule: threshold, matched-share comparison, per-group share |
+| `notebooks/12_text_features.ipynb` | **Task 3** — the raw-text feature blocks that replaced the supplied TF-IDF |
+| `notebooks/13_clustering.ipynb`, `14_ablation.ipynb`, `15_expansion.ipynb` | **Task 3** — pseudo-domains, grouped-CV ablation, expansion attempts |
+| `notebooks/17_lightgbm_tuning.ipynb` | **Task 3** — the final tuning run, on the raw-text representation |
 
 Run `01_eda.ipynb` first on a fresh clone: it builds and saves the shared train/holdout
 split that every later notebook loads, so everyone trains on the exact same data.
 
-At the end, assemble the single labelled `notebooks/SUBMISSION.ipynb` (Tasks 1-3) and the
-Task 4 PDF report in `reports/`.
+### Start here
+
+**`notebooks/SUBMISSION.ipynb` is the graded notebook.** It carries Tasks 1, 2 and 3 in one
+place, clearly labelled, with outputs saved, and it is the notebook to read first. The
+numbered notebooks above are the working record of how the project got there, which is what
+the Task 4 report describes. The report itself is in `reports/`.
 
 ---
 
@@ -163,7 +169,7 @@ src/           reusable, importable helpers (paths, data loading, evaluation, pl
 reports/
   figures/     saved plots — gitignored
 models/        pickled trained models — gitignored
-submissions/   prediction CSVs incl. LogReg_Prediction.csv — gitignored
+submissions/   prediction CSVs incl. LogReg_predictions.csv — gitignored
 ```
 
 `data/`, `models/`, `submissions/`, and `reports/figures/` are gitignored and kept in git via
