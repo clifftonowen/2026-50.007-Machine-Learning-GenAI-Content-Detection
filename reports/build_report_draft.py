@@ -133,8 +133,49 @@ def build():
     who.add_run(", ".join(facts.MEMBERS))
     r.todo("registered Kaggle team name, which is how Task 3 marks are awarded")
 
+    # The submission checklist requires both links on the first page of the report.
+    r.todo("GitHub repository link (the code deliverable)")
+    r.todo("video presentation link. Check a teammate can open it before submitting")
+
+    # The disclaimer the required structure needs, because we depart from it deliberately.
+    note = r.d.add_paragraph()
+    note.add_run("A note on this report's structure. ").bold = True
+    note.add_run(
+        "The submission requirements set out an expected structure in which data "
+        "preprocessing and feature engineering come before models and results. We have "
+        "not followed that order. The project brief presented extra feature engineering "
+        "as optional, so we treated the supplied TF-IDF features as our input through "
+        "baselines, tuning, ensembling and threshold calibration, and rebuilt the "
+        "representation from raw text only in phase 8. Putting feature engineering first "
+        "would imply we designed the feature set before choosing a model, which is not "
+        "what happened, and it would break the roadmap the report is asked to give. We "
+        "have kept the order the project actually ran in. The table below shows where "
+        "each required section is answered."
+    )
+
+    # This report is organised chronologically, but it is graded against the structure
+    # in Project Submission Requirements.pdf. This map is how a marker finds each item.
+    r.table(
+        ["Required section", "Where it is in this report"],
+        [["1. Introduction and Task Understanding",
+          "Introduction, and Why this task is important, and why it is hard"],
+         ["2. Dataset Understanding", "Phase 1: Exploratory Data Analysis"],
+         ["3. Data Preprocessing and Feature Engineering",
+          "Phase 8: Pivot to raw-text features, and Features under Final model"],
+         ["4. Models Explored and Results",
+          "Task 1 and Task 2 under Phase 3; Phase 4 through Phase 9; Final model"],
+         ["5. Discussion", "Discussion, and its three subsections"],
+         ["6. Conclusion", "Final model & Conclusion"],
+         ["7. Individual Reflection", "Individual Reflection"],
+         ["8. Member Contribution", "Member Contribution"]],
+        "How this report maps to the required structure. The body is ordered as the "
+        "project actually ran, so the required sections do not appear in the order the "
+        "requirements list them.",
+        widths=[2.7, 3.4],
+    )
+
     # ------------------------------------------------------------------ 1
-    r.h("1. Summary")
+    r.h("Introduction")
     r.p(
         f"Our best submission scores {facts.BEST_KAGGLE} Macro F1 on the public "
         f"leaderboard. It is a LightGBM classifier trained on {facts.BEST_N_FEATURES:,} "
@@ -146,10 +187,12 @@ def build():
         "This report is organised as a method rather than as a list of results. We worked "
         "through nine phases in order, and each one is written the same way: the options "
         "that were open to us at that point, the pros and cons of each, what we chose, and "
-        "the tradeoff we knowingly accepted. Sections 2 to 10 are those nine phases and "
-        "together they answer the brief's roadmap question. Section 14 gathers the final "
-        "model in one place, section 15 covers the difficulties, section 16 what we "
-        "learned beyond the course, and section 17 the limitations we did not resolve."
+        "the tradeoff we knowingly accepted. The nine phases run from Phase 1 to Phase 9 "
+        "and together they answer the brief's roadmap question. Final model and "
+        "Conclusion gathers the result in one place, Discussion covers the "
+        "difficulties, what we learned beyond the course and the limitations we did "
+        "not resolve, and the last two sections are the individual reflections and "
+        "the member contributions."
     )
     r.p(
         f"Our first submission, a tuned LightGBM on the supplied features with the "
@@ -201,8 +244,44 @@ def build():
              "returned. Four were foundations, two returned nothing measurable, and three "
              "moved the score.", width=6.3)
 
+    # Required section 1b: why the task is important and hard. Written here rather than
+    # at the top because it reads better after the summary has said what we built.
+    r.h("Why this task is important, and why it is hard", level=2)
+    r.p(
+        "Machine-generated text is now cheap enough to produce at a scale where manual "
+        "verification cannot keep up, so the check has to be automated to happen at "
+        "all. The two consequences named in "
+        "the project brief, the integrity of student assignments and fabricated content "
+        "presented as fact, share a structure: the cost of a wrong answer falls on "
+        "someone who was not party to producing the text and has no way to check it "
+        "themselves. That is the case for automating the check."
+    )
+    r.p(
+        "The task is hard for four reasons, and three of them shaped decisions later in "
+        "this report:"
+    )
+    r.bullets([
+        "The signal is stylistic, not topical. Human and machine writing about the same "
+        "subject share vocabulary. What separates them is distributional: function-word "
+        "rates, punctuation habits, sentence-length variance. These are exactly the "
+        "features that stop-word removal and lemmatisation discard, which is why phase 8 "
+        "rebuilt the representation from the raw text.",
+        "Train and test are not drawn alike. The brief warns to expect a high training "
+        "score and a lower test score, and the dataset paper's sampling section explains "
+        "why. Every local split we could build inherits the training set's 62.52% class "
+        "balance, and that is the one distribution the test set does not have.",
+        "The generators are a moving target. A detector fits the models that produced its "
+        "training text; text from a model that did not exist when the set was built is "
+        "out of distribution by construction. Reported accuracy is therefore an upper "
+        "bound on field performance, not an estimate of it.",
+        "The measuring instrument is coarse. On roughly 3,570 scored public rows at Macro "
+        f"F1 near 0.8, binomial noise is about {facts.NOISE_FLOOR}. Many differences that "
+        "look like progress are not resolvable, and we discarded several of our own on "
+        "this basis.",
+    ])
+
     # ------------------------------------------------------------------ 2
-    r.h("2. Phase 1: Exploratory Data Analysis")
+    r.h("Phase 1: Exploratory Data Analysis")
     r.p(
         "No model was trained until we had measured the dataset. That was a deliberate "
         "sequencing choice, and three of the four measurements went on to constrain a "
@@ -273,10 +352,10 @@ def build():
     r.figure("text_length_distribution.png",
              "Document length by class. Length does not separate the classes on its own, "
              "but it correlates with the label strongly enough that it later became the "
-             "basis of our transfer-validation protocol in section 15.2.", width=5.8)
+             "basis of our transfer-validation protocol, described under Difficulties.", width=5.8)
 
     # ------------------------------------------------------------------ 3
-    r.h("3. Phase 2: Dimensionality Reduction")
+    r.h("Phase 2: Dimensionality Reduction")
     r.p(
         "With 5,000 columns over 20,000 rows the obvious next question is whether the "
         "space can be compressed. The brief also requires it: Task 2 fixes a PCA plus "
@@ -285,7 +364,7 @@ def build():
     )
 
     # ------------------------------------------------------------------ 4
-    r.h("4. Phase 3: Choosing the Validation Strategy")
+    r.h("Phase 3: Choosing the Validation Strategy")
     r.p(
         "Phase 1 said the classes are skewed, so this phase turned that measurement into a "
         "protocol and then froze it. The reasoning runs directly from the class balance: "
@@ -330,7 +409,7 @@ def build():
                 "this one could answer both.",
     )
 
-    r.h("5. Task 1: Logistic Regression from Scratch")
+    r.h("Task 1: Logistic Regression from Scratch", level=2)
     r.p(
         "Before either, notebook 02 implements logistic regression by hand, with no "
         "pre-built logistic regression package anywhere in the path, as the brief requires "
@@ -386,7 +465,7 @@ def build():
         "rather than importing the calibration work from phase 7."
     )
 
-    r.h("6. Task 2: PCA and KNN at four component counts")
+    r.h("Task 2: PCA and KNN at four component counts", level=2)
     r.p(
         "PCA at 2,000, 1,000, 500 and 100 components, each feeding a KNN classifier with "
         "n_neighbors fixed at 2. The component counts are set by the task, so this is the "
@@ -463,7 +542,7 @@ def build():
         "specification, which is why we report it rather than change it."
     )
 
-    r.h("7. Decision carried forward for Task 3")
+    r.h("Decision carried forward for Task 3", level=2)
     r.considered(
         [
             ["PCA before every Task 3 model",
@@ -498,7 +577,7 @@ def build():
     )
 
     # ------------------------------------------------------------------ 8
-    r.h("8. Phase 4: Baselines before Tuning")
+    r.h("Phase 4: Baselines before Tuning")
     r.p(
         "The next decision was where to spend tuning effort, and we refused to make it by "
         "reputation. Twelve model families were run at their library defaults under the "
@@ -511,6 +590,76 @@ def build():
          for name, row in base.iterrows()],
         "Twelve baselines at library defaults, stratified 5-fold, supplied features.",
         widths=[2.0, 1.6, 1.6],
+    )
+    # Required section 4a: how each model works, especially the ones not taught in class.
+    r.h("How each of these models works", level=2)
+    r.p(
+        "The requirements ask us to explain every model we explored rather than name it, "
+        "and to say more where the model is not part of the course. The twelve fall into "
+        "four families. Logistic regression and KNN are covered under Task 1 and Task 2 and "
+        "are excluded here, since the FAQ states they do not count toward the models "
+        "explored for Task 3."
+    )
+    r.p("Gradient-boosted trees.", bold=True)
+    r.p(
+        "The top three finishers all belong here, and so does the model that finished "
+        "last. Boosting fits an "
+        "additive model one shallow decision tree at a time, where each new tree is fitted "
+        "to the gradient of the loss with respect to the current ensemble's predictions, "
+        "so every tree is trained on what its predecessors got wrong rather than on the "
+        "original labels. Predictions are the sum of all trees, shrunk by a learning rate "
+        "so that no single tree can dominate. This suits our data because trees select "
+        "features internally as they split, which matters when 5,000 columns are 98.6% "
+        "zero and no coefficient can be estimated for a column a document does not use."
+    )
+    r.bullets([
+        "LightGBM, our eventual winner, buckets each feature's values into a fixed number "
+        "of histogram bins before searching for splits, which makes split-finding cost "
+        "depend on the bin count rather than the row count. It also grows trees leaf-wise, "
+        "always splitting the leaf that promises the largest loss reduction, rather than "
+        "level-by-level. Leaf-wise growth reaches a lower loss for a given number of "
+        "leaves but overfits more readily, which is why num_leaves and min_child_samples "
+        "were the two parameters that mattered most in our search.",
+        "XGBoost uses the same additive scheme with a second-order expansion of the loss, "
+        "so splits are scored using both the gradient and the curvature, and it carries an "
+        "explicit penalty on tree complexity in the objective. It grows level-wise by "
+        "default, which is more conservative than LightGBM's leaf-wise growth and is the "
+        "likeliest reason it finished narrowly behind on identical folds.",
+        "HistGradientBoosting is scikit-learn's histogram-based implementation of the same "
+        "idea, included as a control: it tells us whether the leaders were winning because "
+        "of the boosting scheme itself or because of a specific library's extras.",
+        "AdaBoost, the ancestor of the family, reweights the training rows rather than "
+        "fitting gradients, raising the weight of misclassified examples each round and "
+        "combining stumps by weighted vote. It finished last, which is consistent with its "
+        "exponential loss being unusually sensitive to noisy or mislabelled rows.",
+    ])
+    r.p("Bagged trees.", bold=True)
+    r.p(
+        "RandomForest fits many deep trees independently, each on a bootstrap resample of "
+        "the rows and each considering only a random subset of features at every split, "
+        "then averages them. Averaging independent high-variance, low-bias trees reduces "
+        "variance without raising bias. It placed eighth, below every boosting method: "
+        "with sparse text features, individual bootstrap trees fragment on rare terms, and "
+        "averaging cannot recover a signal none of them captured."
+    )
+    r.p("Naive Bayes.", bold=True)
+    r.p(
+        "MultinomialNB models each class as a bag-of-words multinomial and applies Bayes' "
+        "rule, assuming features are conditionally independent given the class. It is the "
+        "fastest thing in the table and the assumption is plainly false for text, which "
+        "bounds it. ComplementNB is a variant designed for imbalanced data: it estimates "
+        "each class's parameters from the complement of that class, which stabilises the "
+        "estimates for the smaller class. It beat MultinomialNB here, consistent with our "
+        "62.5/37.5 split, but both sat near the bottom."
+    )
+    r.p("Margin-based linear models.", bold=True)
+    r.p(
+        "LinearSVC finds the hyperplane separating the classes with the widest margin, "
+        "minimising a squared-hinge loss that penalises only points on the wrong side or "
+        "inside the margin, with C controlling the trade between margin width and training "
+        "violations. Unlike logistic regression it optimises for the separating boundary "
+        "rather than calibrated probabilities, which is why it was competitive on Macro F1 "
+        "yet needed rank-based handling when we later tried to ensemble it."
     )
     r.p(
         "Three things in that table shaped the rest of the project. Boosted trees took the "
@@ -553,12 +702,30 @@ def build():
              "compare models fairly in phase 7.", width=5.8)
 
     # ------------------------------------------------------------------ 9
-    r.h("9. Phase 5: Tuning")
+    r.h("Phase 5: Tuning")
     r.p(
         "Five families were tuned with the same two-stage protocol: a coarse randomised "
         "search over a wide space, then a focused grid around the winner. Search spaces "
         "were documented in the notebook before the search ran, so the ranges were "
         "justified rather than reverse-engineered from the result."
+    )
+    # Required section 4b asks which hyperparameters were changed. Names are taken from
+    # the stage-2 table in notebooks/SUBMISSION.ipynb; the scores they produced are
+    # reported in the phases that measured them rather than duplicated here.
+    r.h("Hyperparameters searched", level=2)
+    r.table(
+        ["Model", "Key hyperparameters searched"],
+        [["LightGBM", "learning_rate, n_estimators, num_leaves, min_child_samples, "
+                      "colsample_bytree, reg_alpha, reg_lambda"],
+         ["Linear ensemble", "rank blend, hill-climbed weights, meta-GBM stacker over "
+                             "six members"],
+         ["LogReg elastic net", "C, l1_ratio, saga solver"],
+         ["LogReg ridge", "C log-uniform, class_weight balanced"],
+         ["LinearSVC", "C, squared-hinge loss"]],
+        "What each of the five tuned families searched over. The two-stage protocol was "
+        "identical across families, so the difference between them is the space, not the "
+        "effort.",
+        widths=[1.6, 4.5],
     )
     r.p(
         f"It worked, in the sense that the numbers moved. LightGBM went from "
@@ -584,7 +751,7 @@ def build():
         "set, and accepted the second reading. What we did not spot for another two phases "
         "was that we were also comparing models at different predicted class balances, "
         "which made the leaderboard look anti-correlated with local validation when it was "
-        "not. Section 15.1 covers that."
+        "not. The Difficulties section covers that."
     )
     r.considered(
         [
@@ -630,7 +797,7 @@ def build():
              "rule needed a different kind of evidence.", width=5.4)
 
     # ------------------------------------------------------------------ 10
-    r.h("10. Phase 6: Exploring Ensembling Methods")
+    r.h("Phase 6: Exploring Ensembling Methods")
     r.p(
         "With one model tuned and the gap unexplained, the standard next move is to "
         "combine models. The baseline table supported it: boosted trees and linear models "
@@ -695,7 +862,7 @@ def build():
              width=5.8)
 
     # ------------------------------------------------------------------ 11
-    r.h("11. Phase 7: Threshold Calibration")
+    r.h("Phase 7: Threshold Calibration")
     r.p(
         "If the model was not the constraint, the next candidate was the decision rule. A "
         "classifier emits a probability; turning it into a label needs a cut, and we had "
@@ -785,7 +952,7 @@ def build():
              width=5.4)
 
     # ------------------------------------------------------------------ 12
-    r.h("12. Phase 8: Pivot to raw-text features")
+    r.h("Phase 8: Pivot to raw-text features")
     r.p(
         "We were now stuck for a different reason. Tuning had gained 0.005 locally and "
         "little on the leaderboard, ensembling had gained 0.0017, and calibration, which "
@@ -861,9 +1028,10 @@ def build():
     r.p(
         "Readability contributed nothing and the supplied TF-IDF was actively harmful, "
         "costing 0.0074 of held-out-domain Macro F1 by being present. Both were dropped, "
-        f"leaving the {facts.BEST_N_FEATURES:,}-column set in section 14. Note also that "
+        f"leaving the {facts.BEST_N_FEATURES:,}-column set described under Final model. "
+        "Note also that "
         "the diversity block returns more than character n-grams from five columns against "
-        "20,000, which is what prompted the expansion attempt reported in section 15.4."
+        "20,000, which is what prompted the expansion attempt reported under Difficulties."
     )
     r.considered(
         [
@@ -900,7 +1068,7 @@ def build():
                 "deletes function words, punctuation, casing and layout, and those are "
                 "precisely the properties that survive a corpus change, which the ablation "
                 "then confirmed family by family. The brief permits own preprocessing "
-                "provided it is described in full, and this section plus section 14 is "
+                "provided it is described in full, and this section plus Final model is "
                 "that description.",
     )
     r.figure("representation_comparison.png",
@@ -909,7 +1077,7 @@ def build():
              "beat it by 0.115.", width=6.0)
 
     # ------------------------------------------------------------------ 13
-    r.h("13. Phase 9: Calibration per group")
+    r.h("Phase 9: Calibration per group")
     r.p(
         "With the representation settled we returned to the decision rule, and found the "
         "most useful result in the project sitting in a measurement we had already taken "
@@ -988,7 +1156,7 @@ def build():
              "The per-group share surface. Both axes are at their fitted vertices, and the "
              "numeric axis is asymmetric.", width=6.0)
 
-    r.h("13.1 Hyperparameters on new feature representation", level=2)
+    r.h("Hyperparameters on new feature representation", level=2)
     r.p(
         "Every hyperparameter search up to this point had run against the supplied 5,000 "
         f"features. Nothing had been tuned on the {facts.BEST_N_FEATURES:,}-column "
@@ -1027,18 +1195,18 @@ def build():
         f"On the leaderboard it was worth {facts.TUNING_GAIN_KAGGLE:+.5f}, measured "
         "against the previous submission at identical per-group shares so that the "
         "hyperparameters were the only thing that moved. That single number revises this "
-        "report's own headline, and section 1 says how: the identical search on the "
+        "report's own headline, and the Introduction says how: the identical search on the "
         "supplied features had returned nothing, and we had wrongly carried that null "
         "across a change of representation."
     )
 
     # ------------------------------------------------------------------ 14
-    r.h("14. Final model & Conclusion")
+    r.h("Final model & Conclusion")
     r.p(
         "This section answers the brief's first question in one place, gathering what the "
         "nine phases arrived at."
     )
-    r.h("14.1 Classifier", level=2)
+    r.h("Classifier", level=2)
     r.p(
         "LightGBM is a gradient-boosted decision tree ensemble. It fits trees in sequence, "
         "each trained on the gradient of the loss left over by the trees before it, so "
@@ -1052,7 +1220,7 @@ def build():
     r.p(
         "We pass class_weight=\"balanced\" so the 62/38 split does not let the minority "
         "human class be outvoted. The remaining hyperparameters come from the two-stage "
-        "search in section 13.1 and are listed there; the shape of the winner is a slow "
+        "search in Phase 9 and are listed there; the shape of the winner is a slow "
         f"learning rate of {facts.BEST_PARAMS['learning_rate']} over "
         f"{facts.BEST_PARAMS['n_estimators']:,} trees, with each tree seeing about "
         f"{facts.BEST_PARAMS['colsample_bytree']:.0%} of the columns. That column "
@@ -1061,7 +1229,7 @@ def build():
         "redundant, and forcing each tree onto a different third of them is what buys "
         "the diversity the ensemble is built from."
     )
-    r.h("14.2 Features", level=2)
+    r.h("Features", level=2)
     r.table(
         ["Block", "Columns", "What it measures"],
         [[n, f"{c:,}", d] for n, c, d in facts.CHOSEN_BLOCKS],
@@ -1070,7 +1238,7 @@ def build():
         "training text alone.",
         widths=[1.5, 0.9, 3.7],
     )
-    r.h("14.3 Decision Rule", level=2)
+    r.h("Decision Rule", level=2)
     r.p(
         "The model emits a probability per row. We sort the rows by that probability and "
         f"label the top {facts.BEST_SHARES['uuid']:.2%} of the UUID rows and the top "
@@ -1078,7 +1246,7 @@ def build():
         "exact count rather than a quantile so the realised share matches the target on "
         "ties."
     )
-    r.h("14.4 Scores on Kaggle", level=2)
+    r.h("Scores on Kaggle", level=2)
     r.table(
         ["Measurement", "Macro F1"],
         [["Stratified 5-fold cross-validation", f"{facts.BEST_CV_STANDARD:.4f}"],
@@ -1086,7 +1254,7 @@ def build():
           f"{facts.BEST_CV_GROUPED:.4f}"],
          ["Kaggle public leaderboard", f"{facts.BEST_KAGGLE:.5f}"]],
         "The same model measured three ways. The spread between them is the subject of "
-        "section 15.2.",
+        "this section.",
         widths=[3.4, 1.7],
     )
     r.figure("kaggle_journey.png",
@@ -1096,13 +1264,18 @@ def build():
              "Everything flat is a phase spent on the model.")
 
     # ------------------------------------------------------------------ 15
-    r.h("15. Difficulties")
+    r.h("Discussion")
+    r.p(
+        "Three things belong here: the mistakes we made and caught, what the project "
+        "taught us that the course did not, and what we could not resolve."
+    )
+    r.h("Difficulties", level=2)
     r.p(
         "Every item here is a mistake we made and then caught. The cost is included "
         "because the cost is the part that taught us something.", italic=True
     )
 
-    r.h("15.1 We compared models along an axis we had not held fixed", level=2)
+    r.h("We compared models along an axis we had not held fixed", level=3)
     r.p(
         "For three notebooks we believed local validation was anti-correlated with the "
         "leaderboard. LightGBM had the best cross-validation and holdout scores of "
@@ -1110,7 +1283,7 @@ def build():
         "phase on linear models instead."
     )
     r.p(
-        "The inversion was an artifact of the confound described in section 11. Once we "
+        "The inversion was an artifact of the confound described in Phase 7. Once we "
         "re-tested at a matched predicted share, LightGBM beat ElasticNet by 0.0189, in "
         "the same direction and roughly the same magnitude as its local lead. What fixed "
         "it was designing a test that could overturn our own written conclusion, and "
@@ -1118,7 +1291,7 @@ def build():
         "for the rest of the project, and it caught two more errors."
     )
 
-    r.h("15.2 A validation protocol that would not reproduce", level=2)
+    r.h("A validation protocol that would not reproduce", level=3)
     r.p(
         "Once transfer became the question, stratified cross-validation was no longer "
         "enough, because it trains and tests within the same corpora. We built domain "
@@ -1153,7 +1326,7 @@ def build():
              "three milestone models. Grouped validation is not unbiased, but its error is "
              "several times smaller.")
 
-    r.h("15.3 A diagnostic that silently contaminated itself", level=2)
+    r.h("A diagnostic that silently contaminated itself", level=3)
     r.p(
         "We built a submission to test whether the public leaderboard scores the UUID "
         "rows, by changing only those rows and holding the numeric rows fixed. The first "
@@ -1169,7 +1342,7 @@ def build():
         "is byte-identical rather than trusting the share to imply it."
     )
 
-    r.h("15.4 Two predictions we made, and both were wrong", level=2)
+    r.h("Two predictions we made, and both were wrong", level=3)
     r.p(
         "We predicted that the formatting features were dataset fingerprints that would "
         "not survive the corpus change, since machine text in training carries markdown "
@@ -1198,7 +1371,7 @@ def build():
         "idea worked."
     )
 
-    r.h("15.5 What we could not overcome", level=2)
+    r.h("What we could not overcome", level=3)
     r.bullets([
         "Predicted share cannot be validated locally at all. Our dev and holdout splits "
         "are carved from training data and inherit its class balance, so every share "
@@ -1212,8 +1385,8 @@ def build():
     ])
 
     # ------------------------------------------------------------------ 16
-    r.h("16. What we learned beyond the course")
-    r.h("16.1 Averaging can hide two large effects that cancel", level=2)
+    r.h("What we learned beyond the course", level=2)
+    r.h("Averaging can hide two large effects that cancel", level=3)
     r.p(
         "This is the idea that generalises furthest beyond this project. When one global "
         "threshold is applied to a population that is a mixture, the optimum for the "
@@ -1223,7 +1396,7 @@ def build():
         "a roughly -0.019 effect had been cancelling in the average, and the only way to "
         "see it was to stop averaging."
     )
-    r.h("16.2 Blocked and paired comparison", level=2)
+    r.h("Blocked and paired comparison", level=3)
     r.p(
         "Our held-out bands differ in difficulty by far more than any two candidates "
         "differ from each other. Comparing mean scores against a fold standard deviation "
@@ -1233,17 +1406,18 @@ def build():
         "over-conservative bar before we understood this, and we say so rather than "
         "quietly restating it."
     )
-    r.h("16.3 Leave-one-group-out validation as a transfer proxy", level=2)
+    r.h("Leave-one-group-out validation as a transfer proxy", level=3)
     r.p(
         "Standard cross-validation answers how well a model fits this data. When train and "
         "test come from different sources, the question is how well it transfers, and "
         "those are different measurements. Holding out a whole group and training on the "
         "rest approximates the second. The essential companion is the random-grouping "
-        "control in section 15.2: without it, a lower score under grouping is equally "
+        "control described under Difficulties: without it, a lower score under grouping "
+        "is equally "
         "consistent with the protocol simply training on fewer rows, and the whole "
         "apparatus proves nothing."
     )
-    r.h("16.4 A leaderboard is a measuring instrument with a precision", level=2)
+    r.h("A leaderboard is a measuring instrument with a precision", level=3)
     r.p(
         f"We computed the sampling noise of the public leaderboard once, about "
         f"{facts.NOISE_FLOOR} at our row count and score, and then held every claim to it. "
@@ -1251,7 +1425,7 @@ def build():
         "of our own gains, and avoid spending rationed submissions inside flat regions. It "
         "is also why our final picks are not simply the top two public scores."
     )
-    r.h("16.5 Reading the dataset paper was worth more than any model", level=2)
+    r.h("Reading the dataset paper was worth more than any model", level=3)
     r.p(
         "The shared-task paper told us the test corpora were disjoint from training, gave "
         "the class balance of each, and explained why the test file contains two "
@@ -1262,13 +1436,13 @@ def build():
     )
 
     # ------------------------------------------------------------------ 17
-    r.h("17. Limitations and next steps")
+    r.h("Limitations and next steps", level=2)
     r.p("What we consider settled:", bold=True)
     r.bullets([
         "The representation. Raw-text features beat the supplied TF-IDF by a wide margin, "
         "and adding the supplied features back changes nothing measurable.",
         "Global predicted share. Flat from 0.44 to 0.56 on two different models, for the "
-        "reason section 16.1 explains.",
+        "reason explained earlier in the Discussion.",
         "Per-group share. Both axes walked to their vertices.",
         "Feature expansion in the directions we tried. Four ideas, all inside the bar.",
     ])
@@ -1294,6 +1468,35 @@ def build():
         f"Macro F1 on the full English test set. We reach {facts.BEST_KAGGLE * 100:.2f} "
         "with classical models and no deep learning, although the numbers are not strictly "
         "comparable because the course uses a subsample of under 5% of that data."
+    )
+
+    # ------------------------------------------------------------------ 18
+    # Required section 7. What we learned beyond the course is the team's collective
+    # learning; this one is per-person and nobody can write it for anyone else.
+    r.h("Individual Reflection")
+    r.p(
+        "What we learned beyond the course covers the team's collective learning. This "
+        "section is written individually: each of us answers the two questions the "
+        "requirements ask for. The difficulties overlap with the Difficulties section, "
+        "but these are our own view of them."
+    )
+    r.h("Anything you have self-learned", level=2)
+    for member in facts.MEMBERS:
+        r.todo(f"{member}: what you self-learned beyond the course content. Name the "
+               "specific thing and what you did with it, not just the topic")
+    r.h("Any difficulties you faced", level=2)
+    for member in facts.MEMBERS:
+        r.todo(f"{member}: the difficulties you personally faced, and how you handled "
+               "them or what you would do differently")
+
+    # ------------------------------------------------------------------ 19
+    # Required section 8.
+    r.h("Member Contribution")
+    r.table(
+        ["Team Member", "Role Description"],
+        [[m, f"[TODO: what {m} did]"] for m in facts.MEMBERS],
+        "Who did what. Each row is written by that member.",
+        widths=[1.5, 4.6],
     )
 
     return r.save()
