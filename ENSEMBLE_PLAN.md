@@ -1,5 +1,7 @@
 # Ensembling lab - work division
 
+> **Historical planning document.** This is the round-4 work plan as it stood at the time, kept as the record of what we intended and what we predicted. Its "current best" figures and open questions are superseded: the project finished at **0.81249** public Macro F1, and Tasks 1 and 2 were completed. See `README.md` and `notebooks/SUBMISSION.ipynb` for the final state.
+
 **Members:** Cliffton, Brian, Jovyan, Koko · **Budget:** ~1h00 each · **Deadline:** 10 Aug 2026
 
 Supersedes sessions 1–2 of [`ROUND4.md`](ROUND4.md). Everything else in that file - the
@@ -258,10 +260,9 @@ Three things go in the report either way:
 
 ## Also outstanding
 
-**`03_pca_knn.ipynb` is still a scaffold** with `pass` in the loop body. That is **5 marks
-unstarted**, and Task 2 needs four Kaggle uploads to read back its required Macro F1 at
-2000/1000/500/100 components. Against Task 3's remaining upside of at most +3 bonus marks,
-it is the better place to spend the next block of anyone's time.
+**`03_pca_knn.ipynb` was still a scaffold** at the time of writing, with `pass` in the loop
+body. Task 2 was completed afterwards and its Macro F1 at 2000/1000/500/100 components is
+reported in the final report.
 
 ---
 

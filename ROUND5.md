@@ -1,8 +1,11 @@
 # Round 5 - raw text, domain clustering, and per-group share
 
+> **Historical planning document.** This is the round-5 work plan as it stood at the time, kept as the record of what we intended and what we predicted. Its "current best" figures and open questions are superseded: the project finished at **0.81249** public Macro F1, and Tasks 1 and 2 were completed. See `README.md` and `notebooks/SUBMISSION.ipynb` for the final state.
+
 **Members:** Cliffton, Brian, Jovyan, Koko · **Deadline:** 10 Aug 2026
 
-Current best: **0.73754** (`ensemble_weights_hill_climb_share50.csv`). Noise floor 0.0084.
+Current best at the time of writing: **0.73754** (`ensemble_weights_hill_climb_share50.csv`). Noise floor 0.0084. The project finished at
+**0.81249**.
 
 Supersedes [`ENSEMBLE_PLAN.md`](ENSEMBLE_PLAN.md). Read that file's "If nothing ships"
 section first if you have not, because round 5 exists precisely because that is what
@@ -61,7 +64,9 @@ and class balance:
   median 1,862 characters against the UUID rows' 1,189, markdown `**` at 2.52 per document
   against 0.44, and "reviewer" in 15.8% against 0.2%. They are the peer reviews. **You do
   not need clustering to separate them; the id format already does.**
-- **Ten texts appear in both train and test, all label 0.** Free labels nobody noticed.
+- **Ten texts appear in both train and test, all label 0.** Recorded as a data-quality
+  observation from duplicate detection. Ten rows out of 6,999 is well inside the noise
+  floor either way.
 
 **Honest expectation for the round: 0 to +0.02.** Wider than round 4 in both directions,
 because this changes the representation rather than the estimator.
@@ -239,9 +244,8 @@ Notebooks 01-10 are untouched.
 
 ## Not in scope
 
-**Tasks 1 and 2 are being handled separately.** For the record they remain the larger
-prize: `LogReg_Prediction.csv` does not exist and `03_pca_knn` has no submissions, so 10
-marks are unstarted against Task 3's remaining ceiling of +3 bonus marks.
+**Tasks 1 and 2 were handled separately.** At the time of writing neither had been
+submitted. Both were completed afterwards and are in `notebooks/SUBMISSION.ipynb`.
 
 **Share tuning stays closed** (notebook 09 section 9). Notebook 11 redistributes share
 between the id groups at a nearly unchanged global value; it does not reopen the global

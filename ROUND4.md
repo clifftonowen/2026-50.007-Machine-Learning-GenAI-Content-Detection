@@ -1,5 +1,7 @@
 # Round 4 — work division
 
+> **Historical planning document.** This is the round-4 work plan as it stood at the time, kept as the record of what we intended and what we predicted. Its "current best" figures and open questions are superseded: the project finished at **0.81249** public Macro F1, and Tasks 1 and 2 were completed. See `README.md` and `notebooks/SUBMISSION.ipynb` for the final state.
+
 **Members:** Jovyan, Cliffton, Brian Wong, Koko · **Budget:** 3h00 compute each · **Deadline:** 10 Aug 2026
 
 > **Sessions 1–2 (the LightGBM retune) are STOPPED. Sessions 3–4 are superseded by
@@ -275,11 +277,9 @@ Someone should confirm that number from the competition page before we lock the 
 
 ## Also outstanding
 
-**`03_pca_knn.ipynb` is still a scaffold** with `pass` in the loop body — no PCA run, no KNN,
-no submissions. That is **5 marks unstarted** (Task 2 needs four Kaggle uploads to read back
-its required Macro F1 values at 2000/1000/500/100 components), against Task 3's remaining
-upside of at most +3 bonus marks. It is not part of round 4, but it should be scheduled
-before any round 5.
+**`03_pca_knn.ipynb` was still a scaffold** at the time of writing, with `pass` in the loop
+body. It was completed afterwards: Task 2 ran PCA at all four component counts and its
+Macro F1 values are reported in the final report.
 
 ---
 
