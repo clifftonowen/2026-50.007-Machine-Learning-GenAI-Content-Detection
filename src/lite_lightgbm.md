@@ -130,6 +130,9 @@ names already used in this repository's `LGBMClassifier` experiments. It must ex
 - `predict_proba(X)` with columns `[P(y=0), P(y=1)]`;
 - `predict(X)` using class `1` only when its probability is strictly above `0.5`;
 - `score(X, y, sample_weight=None)` returning classification accuracy;
+- `from_lightgbm_dump(model_dump)` for dependency-free conversion of a supported
+  official `Booster.dump_model()` mapping;
+- `from_lightgbm_json(path)` for the JSON-serialized form of that mapping;
 - `get_params()` and `set_params()` for the repository's sklearn-based CV utilities.
 
 The module must not import from or inherit from scikit-learn. It implements `get_params`,
@@ -156,6 +159,7 @@ The internal layout is:
 | `lite_lightgbm_dep/core.py` | Shared configuration, type aliases, constants, and numerical helpers |
 | `lite_lightgbm_dep/binning.py` | Bin containers, mapper fitting, and dense/sparse bin transformation |
 | `lite_lightgbm_dep/tree.py` | Histograms, split search, tree growth, partitioning, and tree traversal |
+| `lite_lightgbm_dep/lightgbm_import.py` | Official numerical binary model-dump validation and conversion |
 
 All names documented in `lite_lightgbm_docs.md` remain importable from
 `src.lite_lightgbm` after extraction. The private modules must not be imported directly
@@ -180,6 +184,21 @@ After fitting, the estimator should own these learned attributes:
 - `learning_rate_`: the learning rate captured by `fit`, so later parameter mutation does
   not change an already-fitted model's predictions;
 - `feature_importances_`: split counts per original feature.
+
+The official-model bridge accepts the JSON-compatible mapping produced by
+`Booster.dump_model()`, without importing LightGBM. It constructs a `BinMapper` from the
+union of official numerical thresholds for each feature and converts each nested tree to
+the array-backed local representation. Because official dump leaf values already include
+shrinkage and the first tree carries the initial binary bias, imported state uses
+`init_score_ = 0.0` and `learning_rate_ = 1.0`.
+
+Conversion must reject unsupported semantics rather than approximate them. Supported
+imports are binary, `sigmoid=1`, one tree per iteration, numerical `<=` splits, constant
+leaves, non-averaged output, and ordinary sparse-zero behavior. Categorical or linear
+trees, multiclass output, `zero_as_missing`, and averaged tree output are rejected.
+Finite prediction inputs must retain the exact feature-column order used by the official
+model. The native LightGBM text model format is outside this bridge; persist
+`dump_model()` as JSON instead.
 
 ### Input and parameter validation
 
