@@ -143,8 +143,9 @@ The implementation is organized into these files:
 | `lite_lightgbm_dep/core.py` | Configuration, shared types, constants, and numerical helpers |
 | `lite_lightgbm_dep/binning.py` | Bin mapper and encoded sparse transformation |
 | `lite_lightgbm_dep/tree.py` | Histograms, splits, tree construction, and traversal |
+| `lite_lightgbm_dep/lightgbm_import.py` | Dependency-free conversion of supported official model dumps |
 
-The three dependency modules are implementation details. Application code and notebooks
+The dependency modules are implementation details. Application code and notebooks
 must not import them directly. All classes and functions documented below remain re-exported
 from `src.lite_lightgbm`, so model construction, fitting, prediction, and development
 helper usage do not change.
@@ -164,7 +165,53 @@ The completed extraction procedure and compatibility gates are in
 
 The initial version does not include native categorical splits, learned missing-value
 directions, multiclass objectives, regression, ranking, GOSS, EFB, DART, early stopping,
-parallel training, or LightGBM model-file compatibility.
+or parallel training. It can import the JSON-compatible result of official
+`Booster.dump_model()` for the restricted numerical binary scope described below; it does
+not parse LightGBM's native text model format.
+
+## Storing and importing official LightGBM weights
+
+A fitted LightGBM model is a tree ensemble, not a single weight vector. The portable
+artifact must retain every split feature, numerical threshold, child relationship, leaf
+value, and objective field. Store the dictionary returned by `Booster.dump_model()` as
+JSON during the official-training/export step:
+
+```python
+import json
+from pathlib import Path
+
+model_dump = official_model.booster_.dump_model()
+Path("models/lightgbm_dump.json").write_text(
+    json.dumps(model_dump), encoding="utf-8"
+)
+```
+
+Runtime prediction then needs neither LightGBM nor scikit-learn:
+
+```python
+from src.lite_lightgbm import LiteLightGBM
+
+model = LiteLightGBM.from_lightgbm_json("models/lightgbm_dump.json")
+raw_scores = model.predict_raw(X_test)
+probabilities = model.predict_proba(X_test)
+labels = model.predict(X_test)
+```
+
+`from_lightgbm_dump(model_dump)` accepts the in-memory dictionary directly. Both entry
+points convert the official numerical thresholds into one global `BinMapper` and the
+official trees into local `DecisionTree` objects. Dumped LightGBM leaf values already
+contain shrinkage, and the first tree contains the model's initial binary bias, so an
+imported predictor intentionally stores `init_score_ = 0` and `learning_rate_ = 1`.
+
+Import is limited to binary models with one numerical `<=` tree per boosting iteration,
+`sigmoid=1`, ordinary sparse-zero semantics, and non-averaged constant leaves. It rejects
+categorical splits, linear trees, multiclass models, `zero_as_missing`, averaged outputs,
+and other incompatible metadata. LiteLightGBM prediction still rejects NaN and infinite
+input. Feature columns must be supplied in exactly the same order used by official
+training.
+
+JSON is preferred over pickle for this bridge: it is portable, contains data rather than
+executable Python objects, and can be loaded without the official LightGBM package.
 
 ## Basic construction
 
@@ -222,7 +269,7 @@ For `class_weight="balanced"`, class `c` receives
 
 ### Learned attributes
 
-These attributes exist after a successful `fit`:
+These attributes exist after a successful `fit` or official-model import:
 
 | Attribute | Meaning |
 |---|---|
@@ -239,6 +286,16 @@ Capturing `learning_rate_` ensures that calling `set_params` after fitting does 
 silently change the predictions of an already-fitted model.
 
 ### Methods
+
+#### `from_lightgbm_dump(model_dump)`
+
+Constructs a fitted predictor from the in-memory mapping returned by official
+`Booster.dump_model()`. No LightGBM import occurs in this module.
+
+#### `from_lightgbm_json(path)`
+
+Loads a JSON serialization of `Booster.dump_model()` and returns the same converted
+predictor. See the compatibility restrictions above.
 
 #### `fit(X, y, sample_weight=None)`
 

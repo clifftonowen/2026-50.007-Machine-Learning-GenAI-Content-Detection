@@ -6,6 +6,9 @@ See ``src/lite_lightgbm_docs.md`` for the API reference and
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+from os import PathLike
 from types import SimpleNamespace
 from typing import Any
 
@@ -45,6 +48,7 @@ from .lite_lightgbm_dep.tree import (
     _predict_tree_raw_validated,
     _validate_tree_storage,
 )
+from .lite_lightgbm_dep.lightgbm_import import import_lightgbm_dump
 
 
 def _active_feature_indices(
@@ -173,6 +177,32 @@ class LiteLightGBM:
             estimator_type="classifier",
             input_tags=SimpleNamespace(pairwise=False),
         )
+
+    @classmethod
+    def from_lightgbm_dump(
+        cls, model_dump: Mapping[str, Any]
+    ) -> LiteLightGBM:
+        """Create a predictor from an official ``Booster.dump_model()`` result."""
+        imported = import_lightgbm_dump(model_dump)
+        model = cls(n_estimators=len(imported.trees), learning_rate=1.0)
+        model.classes_ = np.array([0, 1])
+        model.n_features_in_ = len(imported.mapper.n_bins)
+        model.mapper_ = imported.mapper
+        model.trees_ = imported.trees
+        model.init_score_ = 0.0
+        model.learning_rate_ = 1.0
+        model.feature_importances_ = imported.feature_importances
+        model.active_features_ = imported.active_features
+        return model
+
+    @classmethod
+    def from_lightgbm_json(
+        cls, path: str | PathLike[str]
+    ) -> LiteLightGBM:
+        """Load a JSON-serialized official ``Booster.dump_model()`` result."""
+        with open(path, "r", encoding="utf-8") as model_file:
+            model_dump = json.load(model_file)
+        return cls.from_lightgbm_dump(model_dump)
 
     def fit(
         self,
