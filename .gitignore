@@ -29,8 +29,10 @@ models/*
 submissions/*
 !submissions/.gitkeep
 
-reports/figures/*
-!reports/figures/.gitkeep
+# Report and deck live outside the repo (Google Doc / Slides). The build scripts,
+# generated .docx/.pptx and figures are all local working files, not submission
+# artifacts, so the whole folder stays out of git.
+reports/
 
 # Python
 __pycache__/

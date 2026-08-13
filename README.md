@@ -112,7 +112,7 @@ split that every later notebook loads, so everyone trains on the exact same data
 **`notebooks/SUBMISSION.ipynb` is the graded notebook.** It carries Tasks 1, 2 and 3 in one
 place, clearly labelled, with outputs saved, and it is the notebook to read first. The
 numbered notebooks above are the working record of how the project got there, which is what
-the Task 4 report describes. The report itself is in `reports/`.
+the Task 4 report describes. The report itself is submitted separately, not from this repo.
 
 ---
 
@@ -166,14 +166,15 @@ data/
     tuning_trials/   hyperparameter search results - tracked in git (see below)
 notebooks/     the experiment pipeline (run in order) + final SUBMISSION.ipynb
 src/           reusable, importable helpers (paths, data loading, evaluation, plotting, tuning)
-reports/
-  figures/     saved plots — gitignored
+reports/       local report/deck working files + saved plots — gitignored entirely
 models/        pickled trained models — gitignored
 submissions/   prediction CSVs incl. LogReg_predictions.csv — gitignored
 ```
 
-`data/`, `models/`, `submissions/`, and `reports/figures/` are gitignored and kept in git via
-`.gitkeep` sentinels, so only code and small text artifacts are version-controlled. The one
+`data/`, `models/`, `submissions/` and `reports/` are gitignored, so only code and small text
+artifacts are version-controlled. `data/`, `models/` and `submissions/` keep their folders in
+git via `.gitkeep` sentinels; `reports/` is left out completely, since the report and deck are
+written and submitted outside the repo. The one
 exception is `data/processed/tuning_trials/*.json`, which is deliberately tracked so
 teammates can merge hyperparameter search results via git - see "Team hyperparameter search"
 above.
